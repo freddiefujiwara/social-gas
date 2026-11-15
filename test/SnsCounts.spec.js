@@ -4254,6 +4254,236 @@ describe('SNS follower counts', () => {
         'SNS_HISTORY_SHEET_ID is not set; nothing to diagnose.'
       );
     });
+
+    it('summarizes a media object for the media_url diagnosis without values', () => {
+      const summary = Code.summarizeMediaObjectForDebug_({
+        id: 'm1',
+        media_type: 'VIDEO',
+        media_product_type: 'REELS',
+        status: 'READY',
+        permalink: 'https://www.instagram.com/reel/xyz/',
+        media_url: 'https://example.com/secret.mp4',
+        like_count: 12,
+      });
+      expect(summary.has_media_url).toBe(true);
+      expect(summary.keys).toEqual([
+        'id',
+        'media_type',
+        'media_product_type',
+        'status',
+        'permalink',
+        'media_url',
+        'like_count',
+      ]);
+      // Only the identifying fields keep their values; the
+      // media_url and the permalink never ride along.
+      expect(summary.identity).toEqual({
+        media_type: 'VIDEO',
+        media_product_type: 'REELS',
+        status: 'READY',
+      });
+      expect(JSON.stringify(summary)).not.toContain('example.com');
+      expect(JSON.stringify(summary)).not.toContain('instagram.com');
+      expect(
+        Code.summarizeMediaObjectForDebug_({ id: 'm2', media_type: 'VIDEO' })
+          .has_media_url
+      ).toBe(false);
+      expect(Code.summarizeMediaObjectForDebug_(null)).toBeNull();
+      expect(Code.summarizeMediaObjectForDebug_('m3')).toBeNull();
+    });
+
+    it('debugMediaUrlMissing compares the list object and both direct fetches', () => {
+      store.META_ACCESS_TOKEN = 'meta-token';
+      serveMediaTab([
+        mediaRow({
+          media_id: 'media-measured',
+          type: 'REELS',
+          duration_sec: 104.3,
+        }),
+        mediaRow({ media_id: 'media-a', type: 'REELS' }),
+        mediaRow({ media_id: 'media-image-1', type: 'FEED' }),
+      ]);
+      const logs = [];
+      global.Logger = { log: vi.fn((line) => logs.push(String(line))) };
+      const bytes = mp4WithMvhd(mvhdBox(0, 1000, 90500), 64);
+      fetchHandler = (url) => {
+        if (url.includes('/media?fields=')) {
+          return res(200, {
+            data: [
+              {
+                id: 'media-a',
+                media_type: 'VIDEO',
+                media_product_type: 'REELS',
+                permalink: 'https://www.instagram.com/reel/xyz/',
+              },
+            ],
+          });
+        }
+        if (url.includes('/media-a?access_token=')) {
+          return res(200, {
+            id: 'media-a',
+            media_type: 'VIDEO',
+            media_product_type: 'REELS',
+            timestamp: '2026-11-15T00:00:00+0000',
+            media_url: 'https://example.com/a.mp4',
+          });
+        }
+        if (url.includes('/media-a?fields=media_url')) {
+          return res(200, {
+            id: 'media-a',
+            media_type: 'VIDEO',
+            media_product_type: 'REELS',
+            media_url: 'https://example.com/a.mp4',
+          });
+        }
+        return binRes(206, bytes);
+      };
+      try {
+        Code.debugMediaUrlMissing();
+      } finally {
+        delete global.Logger;
+      }
+      const text = logs.join('\n');
+      expect(text).toContain('debugMediaUrlMissing: 1 unmeasured video(s)');
+      expect(text).toContain('media_id=media-a type=REELS');
+      expect(text).not.toContain('media-measured');
+      expect(text).not.toContain('media-image-1');
+      expect(text).toContain('recent list object: media_url ABSENT');
+      expect(text).toContain(
+        'keys: id, media_type, media_product_type, permalink'
+      );
+      expect(text).toContain('media_type=VIDEO media_product_type=REELS');
+      expect(text).toContain('direct fetch (no fields): media_url present');
+      expect(text).toContain(
+        'direct fetch (fields=media_url,media_type,media_product_type): ' +
+          'media_url present'
+      );
+      expect(text).toContain(
+        'fetchMediaDurationSec_ (via a direct fetch): 90.5 sec'
+      );
+      // Neither the token, a media_url nor a permalink reaches the log.
+      expect(text).not.toContain('meta-token');
+      expect(text).not.toContain('example.com');
+      expect(text).not.toContain('instagram.com/reel');
+    });
+
+    it('debugMediaUrlMissing reports when no request shape returns a media_url', () => {
+      store.META_ACCESS_TOKEN = 'meta-token';
+      serveMediaTab([
+        mediaRow({ media_id: 'media-x', type: 'REELS' }),
+        mediaRow({ media_id: 'media-y', type: 'VIDEO' }),
+      ]);
+      const logs = [];
+      global.Logger = { log: vi.fn((line) => logs.push(String(line))) };
+      fetchHandler = (url) => {
+        if (url.includes('/media?fields=')) {
+          return res(200, {
+            data: [
+              {
+                id: 'media-x',
+                media_type: 'VIDEO',
+                media_product_type: 'REELS',
+              },
+            ],
+          });
+        }
+        if (url.includes('/media-x?access_token=')) {
+          return res(400, { error: { message: 'media gone', code: 100 } });
+        }
+        if (url.includes('/media-x?fields=media_url')) {
+          return res(200, {
+            id: 'media-x',
+            media_type: 'VIDEO',
+            media_product_type: 'REELS',
+          });
+        }
+        if (url.includes('/media-y?')) {
+          return res(200, { id: 'media-y', media_type: 'VIDEO' });
+        }
+        throw new Error('unexpected url: ' + url);
+      };
+      try {
+        Code.debugMediaUrlMissing();
+      } finally {
+        delete global.Logger;
+      }
+      const text = logs.join('\n');
+      expect(text).toContain('debugMediaUrlMissing: 2 unmeasured video(s)');
+      expect(text).toContain('recent list object: media_url ABSENT');
+      expect(text).toContain('direct fetch (no fields): failed: HTTP 400');
+      expect(text).toContain(
+        'no media_url from either direct fetch; the duration was not probed.'
+      );
+      // The second post is still diagnosed, as not in the list.
+      expect(text).toContain('media_id=media-y type=VIDEO');
+      expect(text).toContain(
+        'recent list object: (not in the recent media list)'
+      );
+      expect(text).not.toContain('meta-token');
+    });
+
+    it('debugMediaUrlMissing logs an exception for one media and continues', () => {
+      store.META_ACCESS_TOKEN = 'meta-token';
+      serveMediaTab([
+        mediaRow({ media_id: 'media-boom', type: 'REELS' }),
+        mediaRow({ media_id: 'media-ok', type: 'REELS' }),
+      ]);
+      const logs = [];
+      global.Logger = { log: vi.fn((line) => logs.push(String(line))) };
+      const bytes = mp4WithMvhd(mvhdBox(0, 1000, 90500), 64);
+      fetchHandler = (url) => {
+        if (url.includes('/media?fields=')) {
+          return res(200, { data: [] });
+        }
+        if (url.includes('/media-boom?')) {
+          return {
+            getResponseCode: () => 200,
+            getContentText: () => {
+              throw new Error('boom');
+            },
+          };
+        }
+        if (url.includes('/media-ok?')) {
+          return res(200, {
+            id: 'media-ok',
+            media_type: 'VIDEO',
+            media_product_type: 'REELS',
+            media_url: 'https://example.com/ok.mp4',
+          });
+        }
+        return binRes(206, bytes);
+      };
+      try {
+        Code.debugMediaUrlMissing();
+      } finally {
+        delete global.Logger;
+      }
+      const text = logs.join('\n');
+      expect(text).toContain('diagnosis failed: boom');
+      expect(text).toContain('media_id=media-ok type=REELS');
+      expect(text).toContain(
+        'fetchMediaDurationSec_ (via a direct fetch): 90.5 sec'
+      );
+      expect(text).not.toContain('example.com');
+    });
+
+    it('debugMediaUrlMissing reports when nothing is unmeasured', () => {
+      store.META_ACCESS_TOKEN = 'meta-token';
+      serveMediaTab([
+        mediaRow({ media_id: 'm1', type: 'REELS', duration_sec: 10 }),
+        mediaRow({ media_id: 'm2', type: 'FEED' }),
+      ]);
+      const logs = [];
+      global.Logger = { log: vi.fn((line) => logs.push(String(line))) };
+      try {
+        Code.debugMediaUrlMissing();
+      } finally {
+        delete global.Logger;
+      }
+      expect(logs.join('\n')).toContain(
+        'no REELS / VIDEO rows without a duration_sec in the media tab.'
+      );
+    });
   });
 
   describe('YouTube detail', () => {
