@@ -111,11 +111,13 @@ YouTube・Instagram・Threads のフォロワー数を GAS 自身が定期取得
 
 Threads の数値が取れないときの切り分け用。`debugThreadsFollowers` はフォロワー数取得（`threads_insights` の `followers_count`）の生応答を、`debugThreadsPosts` は詳細取得の3リクエスト（アカウント指標の合算リクエスト、投稿一覧 limit 3、先頭投稿の media insights）の生応答と、本番パーサが読み取った値を実行ログに出す（トークンは伏せる）。どちらもトリガーや doGet からは呼ばれず、スナップショットにも影響しない。
 
-## 診断関数 `debugMediaDuration` / `debugMediaDurationMissing`（手動実行専用）
+## 診断関数 `debugMediaDuration` / `debugMediaDurationMissing` / `debugMediaUrlMissing`（手動実行専用）
 
 動画の長さ（`duration_sec`）が取れない投稿の切り分け用。エディタから手動実行すると、対象メディア（引数に media_id を渡す。省略時は直近の動画を自動で選ぶ）の media_url へ Range リクエスト（先頭512KB・末尾512KB）を行い、各取得について HTTP ステータス、取得バイト数、`moov` / `mvhd` / `mvex` / `mehd` のバイトパターンの有無、読み取れた mvhd の timescale / duration（raw値）と mehd の duration（raw値）、パース結果を実行ログに出す。トリガーや doGet・収集からは呼ばれず、シートやスナップショットにも影響しない。media_url とトークンはログに出さない。
 
 `debugMediaDurationMissing` は「取れていない側」をまとめて見る版。引数なしで実行すると、media シートを収集と同じ読み方で読み、`duration_sec` が未測定の REELS / VIDEO を最大5件選び、1件ごとに `debugMediaDuration` と同じ診断項目を実行ログに出す（media_url はシートに無いため Graph API から取得する。1件が失敗しても残りは続行し、失敗内容もログに出す）。省略時の自動選択が測定済みの投稿を選んでしまう `debugMediaDuration` では未測定側の実物構造が分からないため、こちらを使う。こちらも手動実行専用で、トリガーや doGet・収集からは呼ばれない。
+
+`debugMediaUrlMissing` は、さらに手前の段階（media_url そのものが返ってこない問題）を見る版。2026-11-15 に本番で `debugMediaDurationMissing` を実行したところ、未測定の5件すべてが「media has no media_url to probe」で止まった。つまりパース以前に、Graph API から取得したメディアオブジェクトへ media_url が含まれていなかった。引数なしで実行すると未測定の REELS / VIDEO を最大5件選び、1件ごとに (1) 直近リストで得たオブジェクトの media_url の有無とキー名の一覧（値は出さない。ただし media_type / media_product_type / status の識別系フィールドの値だけは出す）、(2) id 直接取得（`GET /{media-id}`）を fields 指定なしと `fields=media_url,media_type,media_product_type` の2通りで試した結果（同じく有無とキー名の一覧）、(3) 直接取得で media_url が取れた場合はそれを `fetchMediaDurationSec_` に渡した結果（秒）を実行ログに出す。media_url の値そのものとトークンはログに出さない。こちらも手動実行専用で、トリガーや doGet・収集からは呼ばれない。
 
 ## Setup
 

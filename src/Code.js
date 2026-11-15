@@ -3351,7 +3351,8 @@ function parseMp4DurationSec_(bytes) {
   return Math.round(seconds * 10) / 10;
 }
 
-// --- Manual diagnostics: debugMediaDuration / debugMediaDurationMissing ---
+// --- Manual diagnostics: debugMediaDuration / debugMediaDurationMissing /
+// debugMediaUrlMissing ---
 // Run by hand from the Apps Script editor when duration_sec
 // stays null for a post (as on 2026-11-15, when the first
 // production collection measured only 2 of the newest 30
@@ -3373,10 +3374,23 @@ function parseMp4DurationSec_(bytes) {
 // patterns appear, the raw mvhd timescale / duration and mehd
 // duration the inspector read, and the parse result — so the
 // next fix starts from what Instagram actually serves instead
-// of a guess. Neither function is ever called from a trigger,
-// doGet or the collection, and neither touches the snapshot
-// or the sheet. The media_url (a signed CDN URL) and the
-// access token are never logged.
+// of a guess. None of the functions here is ever called from a
+// trigger, doGet or the collection, and none touches the
+// snapshot or the sheet. The media_url (a signed CDN URL) and
+// the access token are never logged.
+// debugMediaUrlMissing goes one step earlier in the pipeline:
+// when debugMediaDurationMissing ran in production on
+// 2026-11-15, every unmeasured post stopped at "media has no
+// media_url to probe" — the media objects the Graph API handed
+// back carried no media_url at all, so the MP4 was never even
+// fetched. It shows, for each unmeasured post, whether the
+// recent-list object and two direct-by-id fetches (no fields
+// parameter, and fields=media_url,media_type,media_product_type)
+// carry a media_url, listing key names only (plus the values
+// of identifying fields such as media_type), and feeds any
+// media_url a direct fetch did return through
+// fetchMediaDurationSec_ — so the next fix starts from which
+// request shape, if any, actually returns the URL.
 function debugMediaDuration(mediaId) {
   const token = getScriptProperty_('META_ACCESS_TOKEN');
   if (!token) {
@@ -3454,11 +3468,24 @@ function debugFetchMediaList_(token) {
 // One media object fetched directly by id, as { media, error },
 // for posts that have aged out of the recent media list.
 function debugFetchMediaById_(mediaId, token) {
+  return debugFetchMediaByIdWithFields_(
+    mediaId,
+    token,
+    'id,media_type,media_product_type,permalink,media_url'
+  );
+}
+
+// One media object fetched directly by id with a caller-chosen
+// fields parameter, as { media, error }; fields null omits the
+// parameter entirely, which is a different request shape (the
+// Graph API then returns its default field set).
+function debugFetchMediaByIdWithFields_(mediaId, token, fields) {
   const oneRes = fetchInsightsJson_(
     META_GRAPH_BASE +
       encodeURIComponent(String(mediaId)) +
-      '?fields=id,media_type,media_product_type,permalink,media_url' +
-      '&access_token=' +
+      '?' +
+      (fields ? 'fields=' + fields + '&' : '') +
+      'access_token=' +
       encodeURIComponent(token)
   );
   if (oneRes.error) {
@@ -3572,6 +3599,42 @@ function selectUnmeasuredDurationMediaRows_(rows, limit) {
   return selected;
 }
 
+// The media tab's rows for the debug entry points, read the
+// way the collection reads them, as { rows, stop }: rows is the
+// tab's objects on success, stop the log line the caller should
+// print (and then return) when there is nothing to diagnose.
+function debugReadMediaTabRows_() {
+  let spreadsheet;
+  try {
+    spreadsheet = openHistorySpreadsheet_();
+    if (!spreadsheet) {
+      return {
+        rows: null,
+        stop: 'SNS_HISTORY_SHEET_ID is not set; nothing to diagnose.',
+      };
+    }
+    const rows = readHistoryTabObjects_(
+      spreadsheet,
+      'media',
+      SNS_HISTORY_MEDIA_COLUMNS
+    );
+    if (!rows) {
+      return {
+        rows: null,
+        stop: 'the media tab does not exist; nothing to diagnose.',
+      };
+    }
+    return { rows, stop: null };
+  } catch (err) {
+    return {
+      rows: null,
+      stop:
+        'media tab could not be read: ' +
+        String((err && err.message) || err).slice(0, 200),
+    };
+  }
+}
+
 // Manual diagnosis for the posts whose duration_sec is still
 // missing (see the section header above). Reads the media tab
 // the way the collection does, then diagnoses each selected
@@ -3580,29 +3643,12 @@ function selectUnmeasuredDurationMediaRows_(rows, limit) {
 // API (the tab does not store it): the recent media list
 // first, a direct fetch by id for posts no longer in it.
 function debugMediaDurationMissing() {
-  let rows = null;
-  try {
-    const spreadsheet = openHistorySpreadsheet_();
-    if (!spreadsheet) {
-      Logger.log('SNS_HISTORY_SHEET_ID is not set; nothing to diagnose.');
-      return;
-    }
-    rows = readHistoryTabObjects_(
-      spreadsheet,
-      'media',
-      SNS_HISTORY_MEDIA_COLUMNS
-    );
-  } catch (err) {
-    Logger.log(
-      'media tab could not be read: ' +
-        String((err && err.message) || err).slice(0, 200)
-    );
+  const tab = debugReadMediaTabRows_();
+  if (tab.stop) {
+    Logger.log(tab.stop);
     return;
   }
-  if (!rows) {
-    Logger.log('the media tab does not exist; nothing to diagnose.');
-    return;
-  }
+  const rows = tab.rows;
   const targets = selectUnmeasuredDurationMediaRows_(
     rows,
     DEBUG_MEDIA_DURATION_MISSING_LIMIT
@@ -3698,6 +3744,178 @@ function debugProbeMediaRange_(mediaUrl, range) {
   } catch (err) {
     return { status, bytes: null };
   }
+}
+
+// The media object fields whose values debugMediaUrlMissing may
+// print: identifying labels only. Everything else about the
+// object — above all the media_url value and any permalink —
+// stays out of the log; only key names are shown.
+const DEBUG_MEDIA_IDENTITY_FIELDS = [
+  'media_type',
+  'media_product_type',
+  'status',
+];
+
+// What a media object offers the duration pipeline, without any
+// of its values: whether a usable media_url is present, the key
+// names it carries, and the identifying fields above. Pure, so
+// the no-values-in-the-log rule is testable.
+function summarizeMediaObjectForDebug_(media) {
+  if (!media || typeof media !== 'object' || Array.isArray(media)) {
+    return null;
+  }
+  const identity = {};
+  DEBUG_MEDIA_IDENTITY_FIELDS.forEach((name) => {
+    const value = media[name];
+    if (typeof value === 'string' && value !== '') {
+      identity[name] = value;
+    }
+  });
+  return {
+    has_media_url:
+      typeof media.media_url === 'string' && media.media_url !== '',
+    keys: Object.keys(media),
+    identity,
+  };
+}
+
+// One log-ready line describing a media object from its summary
+// (see summarizeMediaObjectForDebug_).
+function debugDescribeMediaObject_(media) {
+  const summary = summarizeMediaObjectForDebug_(media);
+  if (!summary) {
+    return '(no object)';
+  }
+  const identity = Object.keys(summary.identity)
+    .map((name) => name + '=' + summary.identity[name])
+    .join(' ');
+  return (
+    'media_url ' +
+    (summary.has_media_url ? 'present' : 'ABSENT') +
+    '; keys: ' +
+    (summary.keys.length ? summary.keys.join(', ') : '(none)') +
+    (identity ? '; ' + identity : '')
+  );
+}
+
+// The per-media diagnosis debugMediaUrlMissing runs: what the
+// recent-list object offers, what two direct-by-id fetches
+// offer (no fields parameter at all, then the minimal fields
+// the duration pipeline needs), and — when a direct fetch did
+// return a media_url — the duration the collection path reads
+// from it.
+function debugLogMediaUrlSources_(mediaId, listMedia, token) {
+  Logger.log(
+    'recent list object: ' +
+      (listMedia
+        ? debugDescribeMediaObject_(listMedia)
+        : '(not in the recent media list)')
+  );
+  const shapes = [
+    ['no fields', null],
+    [
+      'fields=media_url,media_type,media_product_type',
+      'media_url,media_type,media_product_type',
+    ],
+  ];
+  let directMediaWithUrl = null;
+  shapes.forEach(([label, fields]) => {
+    const one = debugFetchMediaByIdWithFields_(mediaId, token, fields);
+    if (one.error) {
+      Logger.log('direct fetch (' + label + '): failed: ' + one.error);
+      return;
+    }
+    Logger.log(
+      'direct fetch (' + label + '): ' + debugDescribeMediaObject_(one.media)
+    );
+    if (!directMediaWithUrl && one.media && one.media.media_url) {
+      directMediaWithUrl = one.media;
+    }
+  });
+  if (directMediaWithUrl) {
+    Logger.log(
+      'fetchMediaDurationSec_ (via a direct fetch): ' +
+        fetchMediaDurationSec_(directMediaWithUrl.media_url) +
+        ' sec'
+    );
+    return;
+  }
+  Logger.log(
+    'no media_url from either direct fetch; the duration was not probed.'
+  );
+}
+
+// Manual diagnosis for where the media_url goes missing (see
+// the section header above). Selects the unmeasured posts the
+// same way debugMediaDurationMissing does, then compares what
+// each request shape returns for them; one post's failure is
+// logged and never stops the rest.
+function debugMediaUrlMissing() {
+  const tab = debugReadMediaTabRows_();
+  if (tab.stop) {
+    Logger.log(tab.stop);
+    return;
+  }
+  const targets = selectUnmeasuredDurationMediaRows_(
+    tab.rows,
+    DEBUG_MEDIA_DURATION_MISSING_LIMIT
+  );
+  if (!targets.length) {
+    Logger.log(
+      'no REELS / VIDEO rows without a duration_sec in the media tab.'
+    );
+    return;
+  }
+  const token = getScriptProperty_('META_ACCESS_TOKEN');
+  if (!token) {
+    Logger.log('META_ACCESS_TOKEN is not set; nothing to diagnose.');
+    return;
+  }
+  const byId = {};
+  const list = debugFetchMediaList_(token);
+  if (list.error) {
+    Logger.log(
+      'media list failed: ' +
+        list.error +
+        ' (checking the direct fetches instead)'
+    );
+  } else {
+    list.items.forEach((item) => {
+      if (item && item.id != null) {
+        byId[String(item.id)] = item;
+      }
+    });
+  }
+  Logger.log(
+    '=== debugMediaUrlMissing: ' +
+      targets.length +
+      ' unmeasured video(s) ==='
+  );
+  targets.forEach((target, index) => {
+    Logger.log(
+      '--- [' +
+        (index + 1) +
+        '/' +
+        targets.length +
+        '] media_id=' +
+        target.media_id +
+        ' type=' +
+        target.type +
+        ' ---'
+    );
+    try {
+      debugLogMediaUrlSources_(
+        target.media_id,
+        byId[target.media_id] || null,
+        token
+      );
+    } catch (err) {
+      Logger.log(
+        'diagnosis failed: ' +
+          String((err && err.message) || err).slice(0, 200)
+      );
+    }
+  });
 }
 
 // YouTube advanced-service errors carry API messages (no secrets),
@@ -7220,6 +7438,8 @@ if (typeof exports !== 'undefined') {
   exports.selectUnmeasuredDurationMediaRows_ =
     selectUnmeasuredDurationMediaRows_;
   exports.debugMediaDurationMissing = debugMediaDurationMissing;
+  exports.summarizeMediaObjectForDebug_ = summarizeMediaObjectForDebug_;
+  exports.debugMediaUrlMissing = debugMediaUrlMissing;
   exports.fetchMediaInsights_ = fetchMediaInsights_;
   exports.parseMediaInsights_ = parseMediaInsights_;
   exports.fetchYouTubeChannelDetail_ = fetchYouTubeChannelDetail_;
