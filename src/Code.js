@@ -3113,7 +3113,10 @@ function parseMediaInsights_(data) {
 // Neither the media object nor its insights carry the video's
 // length, so the duration comes from the MP4 file itself: the
 // mvhd box inside moov holds the movie's timescale and
-// duration. A length never changes once a post exists, so the
+// duration (fragmented MP4s leave that duration at 0 and carry
+// the length in the mehd box instead — see
+// parseMp4DurationSec_). A length never changes once a post
+// exists, so the
 // collection first reuses the value the media tab already
 // stores for the post and only fetches files for videos it has
 // never measured — that keeps the extra UrlFetch calls (and
@@ -3224,65 +3227,298 @@ function fetchMediaByteRange_(mediaUrl, range) {
   }
 }
 
-// The pure parser: scans a byte array (signed, as Apps Script
-// hands back, or unsigned) for the mvhd box and returns the
-// movie length in seconds to 0.1s — the same precision
-// avg_watch_sec is stored at — or null when no plausible mvhd
-// is present. mvhd layout after the type: version/flags
-// (4 bytes), then for version 1 two 64-bit timestamps, a
-// 32-bit timescale and a 64-bit duration; for version 0 the
-// same fields at 32 bits each.
-function parseMp4DurationSec_(bytes) {
+// Scans a byte array (signed, as Apps Script hands back, or
+// unsigned) for the two MP4 header boxes that carry a movie's
+// length and returns their raw fields: { mvhd, mehd }, each
+// either null or { version, timescale, duration } (mvhd) /
+// { version, duration } (mehd). The first plausible candidate
+// of each type wins: an mvhd candidate needs a known version
+// and a nonzero timescale (its duration may still be 0 — see
+// parseMp4DurationSec_), a mehd candidate a known version.
+// mvhd layout after the type: version/flags (4 bytes), then
+// for version 1 two 64-bit timestamps, a 32-bit timescale and
+// a 64-bit duration; for version 0 the same fields at 32 bits
+// each. mehd layout after the type: version/flags (4 bytes),
+// then the duration at 32 bits (version 0) or 64 bits
+// (version 1), in the movie's timescale units.
+function inspectMp4Headers_(bytes) {
+  const found = { mvhd: null, mehd: null };
   if (!bytes || bytes.length < 24) {
-    return null;
+    return found;
   }
   const u8 = (index) => bytes[index] & 0xff;
   const u32 = (index) =>
     ((u8(index) * 256 + u8(index + 1)) * 256 + u8(index + 2)) * 256 +
     u8(index + 3);
-  // 'mvhd'
+  const matchesType = (index, type) =>
+    u8(index) === type.charCodeAt(0) &&
+    u8(index + 1) === type.charCodeAt(1) &&
+    u8(index + 2) === type.charCodeAt(2) &&
+    u8(index + 3) === type.charCodeAt(3);
+  for (let i = 0; i + 4 <= bytes.length; i++) {
+    if (!found.mvhd && matchesType(i, 'mvhd')) {
+      const content = i + 4;
+      const version = u8(content);
+      let timescale = null;
+      let duration = null;
+      if (version === 1 && content + 32 <= bytes.length) {
+        timescale = u32(content + 20);
+        duration = u32(content + 24) * 4294967296 + u32(content + 28);
+      } else if (version === 0 && content + 20 <= bytes.length) {
+        timescale = u32(content + 12);
+        duration = u32(content + 16);
+      }
+      if (timescale) {
+        found.mvhd = { version, timescale, duration };
+      }
+    }
+    if (!found.mehd && matchesType(i, 'mehd')) {
+      const content = i + 4;
+      const version = u8(content);
+      let duration = null;
+      if (version === 1 && content + 12 <= bytes.length) {
+        duration = u32(content + 4) * 4294967296 + u32(content + 8);
+      } else if (version === 0 && content + 8 <= bytes.length) {
+        duration = u32(content + 4);
+      }
+      if (duration !== null) {
+        found.mehd = { version, duration };
+      }
+    }
+    if (found.mvhd && found.mehd) {
+      break;
+    }
+  }
+  return found;
+}
+
+// Whether the four box-type bytes appear anywhere in the byte
+// array. Diagnostic only (debugMediaDuration): byte patterns
+// can also occur inside compressed media data, so presence is
+// a hint, not proof of a real box.
+function mp4BoxTypePresent_(bytes, type) {
+  if (!bytes || bytes.length < 4) {
+    return false;
+  }
+  const codes = [
+    type.charCodeAt(0),
+    type.charCodeAt(1),
+    type.charCodeAt(2),
+    type.charCodeAt(3),
+  ];
   for (let i = 0; i + 4 <= bytes.length; i++) {
     if (
-      u8(i) !== 0x6d ||
-      u8(i + 1) !== 0x76 ||
-      u8(i + 2) !== 0x68 ||
-      u8(i + 3) !== 0x64
+      (bytes[i] & 0xff) === codes[0] &&
+      (bytes[i + 1] & 0xff) === codes[1] &&
+      (bytes[i + 2] & 0xff) === codes[2] &&
+      (bytes[i + 3] & 0xff) === codes[3]
     ) {
-      continue;
+      return true;
     }
-    const content = i + 4;
-    const version = u8(content);
-    let timescale;
-    let duration;
-    if (version === 1) {
-      if (content + 32 > bytes.length) {
-        continue;
-      }
-      timescale = u32(content + 20);
-      duration = u32(content + 24) * 4294967296 + u32(content + 28);
-    } else if (version === 0) {
-      if (content + 20 > bytes.length) {
-        continue;
-      }
-      timescale = u32(content + 12);
-      duration = u32(content + 16);
-    } else {
-      continue;
-    }
-    if (!timescale || !duration) {
-      continue;
-    }
-    const seconds = duration / timescale;
-    if (
-      !Number.isFinite(seconds) ||
-      seconds < 0.1 ||
-      seconds > MEDIA_DURATION_MAX_SEC
-    ) {
-      continue;
-    }
-    return Math.round(seconds * 10) / 10;
   }
-  return null;
+  return false;
+}
+
+// The pure parser: the movie length in seconds to 0.1s — the
+// same precision avg_watch_sec is stored at — or null when no
+// plausible header is present. A plain MP4 carries the length
+// in mvhd's duration. A fragmented MP4 (the shape Instagram
+// serves for most reels) leaves mvhd's duration at 0 and
+// carries the full length in the mehd box inside mvex, in the
+// same timescale units, so a zero mvhd duration falls back to
+// mehd. A positive mvhd duration always wins over mehd.
+function parseMp4DurationSec_(bytes) {
+  const headers = inspectMp4Headers_(bytes);
+  if (!headers.mvhd) {
+    return null;
+  }
+  const duration = headers.mvhd.duration
+    ? headers.mvhd.duration
+    : headers.mehd
+      ? headers.mehd.duration
+      : 0;
+  if (!duration) {
+    return null;
+  }
+  const seconds = duration / headers.mvhd.timescale;
+  if (
+    !Number.isFinite(seconds) ||
+    seconds < 0.1 ||
+    seconds > MEDIA_DURATION_MAX_SEC
+  ) {
+    return null;
+  }
+  return Math.round(seconds * 10) / 10;
+}
+
+// --- Manual diagnostics: debugMediaDuration -------------------
+// Run by hand from the Apps Script editor when duration_sec
+// stays null for a post (as on 2026-11-15, when the first
+// production collection measured only 2 of the newest 30
+// videos — the two long song reels — and the fragmented-MP4
+// mehd fallback followed). Call it with the media_id to
+// inspect; with no argument it probes the newest video in the
+// recent media list, which is the form the editor's Run
+// button can use. For each Range probe (head, then tail) it
+// logs the HTTP status, the byte count, which of the
+// moov / mvhd / mvex / mehd byte patterns appear, the raw
+// mvhd timescale / duration and mehd duration the inspector
+// read, and the parse result — so the next fix starts from
+// what Instagram actually serves instead of a guess. It is
+// never called from a trigger, doGet or the collection, and
+// it does not touch the snapshot or the sheet. The media_url
+// (a signed CDN URL) and the access token are never logged.
+function debugMediaDuration(mediaId) {
+  const token = getScriptProperty_('META_ACCESS_TOKEN');
+  if (!token) {
+    Logger.log('META_ACCESS_TOKEN is not set; nothing to diagnose.');
+    return;
+  }
+  const listRes = fetchInsightsJson_(
+    META_GRAPH_BASE +
+      SNS_INSTAGRAM_MAIN_ID +
+      '/media?fields=id,media_type,media_product_type,permalink,media_url&limit=' +
+      SNS_RECENT_MEDIA_LIMIT +
+      '&access_token=' +
+      encodeURIComponent(token)
+  );
+  if (listRes.error) {
+    Logger.log('media list failed: ' + listRes.error);
+    return;
+  }
+  const items =
+    listRes.data && Array.isArray(listRes.data.data) ? listRes.data.data : [];
+  let media = null;
+  if (mediaId != null && String(mediaId) !== '') {
+    media =
+      items.find((item) => item && String(item.id) === String(mediaId)) ||
+      null;
+    if (!media) {
+      const oneRes = fetchInsightsJson_(
+        META_GRAPH_BASE +
+          encodeURIComponent(String(mediaId)) +
+          '?fields=id,media_type,media_product_type,permalink,media_url' +
+          '&access_token=' +
+          encodeURIComponent(token)
+      );
+      if (oneRes.error) {
+        Logger.log(
+          'media ' + mediaId + ' not in the recent list; direct fetch failed: ' +
+            oneRes.error
+        );
+        return;
+      }
+      media = oneRes.data;
+    }
+  } else {
+    media =
+      items.find(
+        (item) =>
+          item &&
+          item.media_url &&
+          (item.media_product_type === 'REELS' ||
+            item.media_type === 'VIDEO')
+      ) || null;
+    if (!media) {
+      Logger.log('no video with a media_url in the recent media list.');
+      return;
+    }
+    Logger.log(
+      'no media_id given; probing the newest video: ' + media.id
+    );
+  }
+  if (!media || !media.media_url) {
+    Logger.log('media has no media_url to probe.');
+    return;
+  }
+  Logger.log(
+    '=== debugMediaDuration: media ' +
+      media.id +
+      ' (' +
+      (media.media_product_type || media.media_type || 'unknown type') +
+      ') ==='
+  );
+  const probes = [
+    ['head', 'bytes=0-' + (MEDIA_DURATION_PROBE_BYTES - 1)],
+    ['tail', 'bytes=-' + MEDIA_DURATION_PROBE_BYTES],
+  ];
+  probes.forEach(([label, range]) => {
+    const probe = debugProbeMediaRange_(media.media_url, range);
+    Logger.log('--- ' + label + ' range ' + range + ' ---');
+    if (!probe.bytes) {
+      Logger.log(
+        'fetch failed (status: ' +
+          (probe.status === null ? 'exception' : probe.status) +
+          ')'
+      );
+      return;
+    }
+    Logger.log(
+      'status: ' + probe.status + ', bytes: ' + probe.bytes.length
+    );
+    Logger.log(
+      'box patterns: moov=' +
+        mp4BoxTypePresent_(probe.bytes, 'moov') +
+        ' mvhd=' +
+        mp4BoxTypePresent_(probe.bytes, 'mvhd') +
+        ' mvex=' +
+        mp4BoxTypePresent_(probe.bytes, 'mvex') +
+        ' mehd=' +
+        mp4BoxTypePresent_(probe.bytes, 'mehd')
+    );
+    const headers = inspectMp4Headers_(probe.bytes);
+    Logger.log(
+      'mvhd: ' +
+        (headers.mvhd
+          ? 'version=' +
+            headers.mvhd.version +
+            ' timescale=' +
+            headers.mvhd.timescale +
+            ' duration=' +
+            headers.mvhd.duration
+          : '(none)')
+    );
+    Logger.log(
+      'mehd: ' +
+        (headers.mehd
+          ? 'version=' + headers.mehd.version + ' duration=' + headers.mehd.duration
+          : '(none)')
+    );
+    Logger.log(
+      'parse result: ' + parseMp4DurationSec_(probe.bytes) + ' sec'
+    );
+  });
+  Logger.log(
+    'fetchMediaDurationSec_ (the collection path): ' +
+      fetchMediaDurationSec_(media.media_url) +
+      ' sec'
+  );
+}
+
+// One ranged GET for debugMediaDuration, reporting the HTTP
+// status alongside the bytes ({ status, bytes }; status is
+// null when the fetch itself threw, bytes null unless the
+// status was 200 / 206). Never throws.
+function debugProbeMediaRange_(mediaUrl, range) {
+  let res;
+  try {
+    res = UrlFetchApp.fetch(mediaUrl, {
+      muteHttpExceptions: true,
+      headers: { Range: range },
+    });
+  } catch (err) {
+    return { status: null, bytes: null };
+  }
+  const status = res.getResponseCode();
+  if (status !== 200 && status !== 206) {
+    return { status, bytes: null };
+  }
+  try {
+    const content = res.getContent();
+    return { status, bytes: content && content.length ? content : null };
+  } catch (err) {
+    return { status, bytes: null };
+  }
 }
 
 // YouTube advanced-service errors carry API messages (no secrets),
@@ -6800,6 +7036,8 @@ if (typeof exports !== 'undefined') {
   exports.resolveMediaDurationSec_ = resolveMediaDurationSec_;
   exports.fetchMediaDurationSec_ = fetchMediaDurationSec_;
   exports.parseMp4DurationSec_ = parseMp4DurationSec_;
+  exports.inspectMp4Headers_ = inspectMp4Headers_;
+  exports.debugMediaDuration = debugMediaDuration;
   exports.fetchMediaInsights_ = fetchMediaInsights_;
   exports.parseMediaInsights_ = parseMediaInsights_;
   exports.fetchYouTubeChannelDetail_ = fetchYouTubeChannelDetail_;

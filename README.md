@@ -70,7 +70,7 @@ YouTube・Instagram・Threads のフォロワー数を GAS 自身が定期取得
   - follows 内訳は、2026-11-09 の本番診断で確定した形で読む：`follows_and_unfollows` は `metric_type=total_value`＋`breakdown=follow_type` のときにだけ内訳が返り、ラベルは結果の状態を表す（`FOLLOWER`＝フォローした数 → `follows_30d`、`NON_FOLLOWER`＝フォローを外した数 → `unfollows_30d`）。照合はこの2ラベルの完全一致（大文字小文字は無視）を最優先とし、どちらにも一致しなかった場合は観測したラベル一覧が `instagram.detail_error` に `follows_and_unfollows labels: [...]` として記録される
 - Instagram フォロワー属性（lifetime）：`instagram.demographics` = `age_gender`（`{key, value}` の降順リスト、key は "25-34/F" 形式）、`top_cities` / `top_countries`（各上位10件）。失敗分は `instagram.detail_error` に合算
 - Instagram 投稿ごと（新しい順・最大30件）：`instagram.recent_media[]` = `{id, type, posted_at, caption（80字まで）, permalink, views, reach, likes, comments, shares, saves, avg_watch_sec, total_watch_sec, duration_sec}`。リールの視聴時間はミリ秒→秒に変換。メディア種別で使える metric が違うため、失敗時は metric を絞って再試行する。失敗時は `instagram.media_error`
-  - `duration_sec` は動画自体の長さ（秒、リール／動画のみ）。Graph API に長さのフィールドが無いため、MP4 の `mvhd` ボックス（timescale と duration）から読む。収集時に media_url へ Range リクエスト（先頭512KB、無ければ末尾512KB）で取得し、解析する。長さは不変なので、media シートに保存済みの投稿は再取得せず引き継ぐ（取得は未測定の動画だけに限られ、UrlFetch の追加呼び出しは収集1回あたり新規動画の分だけ）。失敗した投稿は null のまま
+  - `duration_sec` は動画自体の長さ（秒、リール／動画のみ）。Graph API に長さのフィールドが無いため、MP4 の `mvhd` ボックス（timescale と duration）から読む。fragmented MP4 では mvhd の duration が 0 になるため、その場合は `mvex` 内の `mehd` ボックスの duration（mvhd の timescale 単位）にフォールバックする。収集時に media_url へ Range リクエスト（先頭512KB、無ければ末尾512KB）で取得し、解析する。長さは不変なので、media シートに保存済みの投稿は再取得せず引き継ぐ（取得は未測定の動画だけに限られ、UrlFetch の追加呼び出しは収集1回あたり新規動画の分だけ）。失敗した投稿は null のまま
 - YouTube：`youtube.total_views`（総再生数）と `youtube.video_count`（動画数）を追加。`youtube.recent_videos[]`（新しい順・最大10件）= `{id, title, published_at, views, likes, comments, url}`。失敗時は `youtube.youtube_error`
 - Threads アカウント全体（過去30日）：`threads.views_30d`、`threads.interactions_30d`（total / likes / replies / reposts / quotes）。`threads_insights` から metric ごとに取得し、total_value があればそれを、なければ日別 values の合計を読む（フォロワー数だけは現在値なので従来どおり別扱い）。失敗時は `threads.detail_error`
 - Threads 投稿ごと（新しい順・最大30件）：`threads.recent_posts[]` = `{id, type, posted_at, text（全文、上限2000字）, permalink, views, likes, replies, reposts, quotes}`。投稿一覧は本人の `threads` エッジ、数値は各投稿の media insights から。insights が取れない投稿（他人の投稿のリポスト等）は数値 null のまま残り、失敗件数は `threads.posts_error` に要約される
@@ -110,6 +110,10 @@ YouTube・Instagram・Threads のフォロワー数を GAS 自身が定期取得
 ## 診断関数 `debugThreadsFollowers` / `debugThreadsPosts`（手動実行専用）
 
 Threads の数値が取れないときの切り分け用。`debugThreadsFollowers` はフォロワー数取得（`threads_insights` の `followers_count`）の生応答を、`debugThreadsPosts` は詳細取得の3リクエスト（アカウント指標の合算リクエスト、投稿一覧 limit 3、先頭投稿の media insights）の生応答と、本番パーサが読み取った値を実行ログに出す（トークンは伏せる）。どちらもトリガーや doGet からは呼ばれず、スナップショットにも影響しない。
+
+## 診断関数 `debugMediaDuration`（手動実行専用）
+
+動画の長さ（`duration_sec`）が取れない投稿の切り分け用。エディタから手動実行すると、対象メディア（引数に media_id を渡す。省略時は直近の動画を自動で選ぶ）の media_url へ Range リクエスト（先頭512KB・末尾512KB）を行い、各取得について HTTP ステータス、取得バイト数、`moov` / `mvhd` / `mvex` / `mehd` のバイトパターンの有無、読み取れた mvhd の timescale / duration（raw値）と mehd の duration（raw値）、パース結果を実行ログに出す。トリガーや doGet・収集からは呼ばれず、シートやスナップショットにも影響しない。media_url とトークンはログに出さない。
 
 ## Setup
 

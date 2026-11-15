@@ -3728,6 +3728,35 @@ describe('SNS follower counts', () => {
       ...u32be(mvhd.length + 8), ...asciiBytes('moov'), ...mvhd,
     ];
 
+    // A synthetic mehd box: size, 'mehd', version/flags, then
+    // the duration at 32 bits (version 0) or 64 bits (v1).
+    const mehdBox = (version, duration) => {
+      const body =
+        version === 1
+          ? [
+              1, 0, 0, 0,
+              ...u32be(Math.floor(duration / 4294967296)),
+              ...u32be(duration % 4294967296),
+            ]
+          : [0, 0, 0, 0, ...u32be(duration)];
+      return [...u32be(body.length + 8), ...asciiBytes('mehd'), ...body];
+    };
+
+    // ftyp, filler, then moov > mvhd + mvex > mehd (the
+    // fragmented layout). A null mehd leaves mvex out entirely.
+    const mp4WithHeaders = (mvhd, mehd, fillerBytes) => {
+      const mvex = mehd
+        ? [...u32be(mehd.length + 8), ...asciiBytes('mvex'), ...mehd]
+        : [];
+      const moovBody = [...mvhd, ...mvex];
+      return [
+        ...u32be(24), ...asciiBytes('ftyp'), ...asciiBytes('isom'),
+        ...u32be(0), ...asciiBytes('isom'), ...asciiBytes('iso2'),
+        ...new Array(fillerBytes || 0).fill(0),
+        ...u32be(moovBody.length + 8), ...asciiBytes('moov'), ...moovBody,
+      ];
+    };
+
     const binRes = (status, bytes) => ({
       getResponseCode: () => status,
       getContent: () => bytes,
@@ -3772,6 +3801,107 @@ describe('SNS follower counts', () => {
       expect(
         Code.parseMp4DurationSec_(mp4WithMvhd(badVersion, 64))
       ).toBeNull();
+    });
+
+    it('falls back to a version 0 mehd when the mvhd duration is 0', () => {
+      const bytes = mp4WithHeaders(mvhdBox(0, 1000, 0), mehdBox(0, 90500), 64);
+      expect(Code.parseMp4DurationSec_(bytes)).toBe(90.5);
+    });
+
+    it('falls back to a version 1 mehd (64-bit duration)', () => {
+      const bytes = mp4WithHeaders(
+        mvhdBox(0, 90000, 0),
+        mehdBox(1, 4294967296 + 90000 * 10),
+        64
+      );
+      expect(Code.parseMp4DurationSec_(bytes)).toBe(47731.9);
+    });
+
+    it('prefers a positive mvhd duration over mehd', () => {
+      const bytes = mp4WithHeaders(
+        mvhdBox(0, 1000, 90500),
+        mehdBox(0, 5000),
+        64
+      );
+      expect(Code.parseMp4DurationSec_(bytes)).toBe(90.5);
+    });
+
+    it('returns null when the mvhd duration is 0 and there is no mehd', () => {
+      const bytes = mp4WithHeaders(mvhdBox(0, 1000, 0), null, 64);
+      expect(Code.parseMp4DurationSec_(bytes)).toBeNull();
+    });
+
+    it('finds mehd even when mvex precedes mvhd inside moov', () => {
+      const mehd = mehdBox(0, 90500);
+      const mvex = [
+        ...u32be(mehd.length + 8), ...asciiBytes('mvex'), ...mehd,
+      ];
+      const moovBody = [...mvex, ...mvhdBox(0, 1000, 0)];
+      const bytes = [
+        ...u32be(24), ...asciiBytes('ftyp'), ...asciiBytes('isom'),
+        ...u32be(0), ...asciiBytes('isom'), ...asciiBytes('iso2'),
+        ...new Array(64).fill(0),
+        ...u32be(moovBody.length + 8), ...asciiBytes('moov'), ...moovBody,
+      ];
+      expect(Code.parseMp4DurationSec_(bytes)).toBe(90.5);
+    });
+
+    it('inspects the raw mvhd / mehd fields', () => {
+      const bytes = mp4WithHeaders(mvhdBox(0, 1000, 0), mehdBox(1, 12300), 64);
+      expect(Code.inspectMp4Headers_(bytes)).toEqual({
+        mvhd: { version: 0, timescale: 1000, duration: 0 },
+        mehd: { version: 1, duration: 12300 },
+      });
+      expect(Code.inspectMp4Headers_(null)).toEqual({
+        mvhd: null,
+        mehd: null,
+      });
+    });
+
+    it('debugMediaDuration logs the probe diagnosis for one media', () => {
+      store.META_ACCESS_TOKEN = 'meta-token';
+      const logs = [];
+      global.Logger = { log: vi.fn((line) => logs.push(String(line))) };
+      const bytes = mp4WithHeaders(mvhdBox(0, 1000, 0), mehdBox(0, 90500), 64);
+      fetchHandler = (url, options) => {
+        if (url.includes('/media?fields=')) {
+          return res(200, {
+            data: [
+              {
+                id: 'media-reel-1',
+                media_type: 'VIDEO',
+                media_product_type: 'REELS',
+                media_url: 'https://example.com/v.mp4',
+              },
+            ],
+          });
+        }
+        return binRes(206, bytes);
+      };
+      try {
+        Code.debugMediaDuration('media-reel-1');
+      } finally {
+        delete global.Logger;
+      }
+      const text = logs.join('\n');
+      expect(text).toContain('status: 206');
+      expect(text).toContain('mvhd: version=0 timescale=1000 duration=0');
+      expect(text).toContain('mehd: version=0 duration=90500');
+      expect(text).toContain('parse result: 90.5 sec');
+      expect(text).toContain(
+        'fetchMediaDurationSec_ (the collection path): 90.5 sec'
+      );
+    });
+
+    it('debugMediaDuration stops without a token', () => {
+      const logs = [];
+      global.Logger = { log: vi.fn((line) => logs.push(String(line))) };
+      try {
+        Code.debugMediaDuration('media-reel-1');
+      } finally {
+        delete global.Logger;
+      }
+      expect(logs.join('\n')).toContain('META_ACCESS_TOKEN is not set');
     });
 
     it('fetches the head range first and stops when mvhd is there', () => {
