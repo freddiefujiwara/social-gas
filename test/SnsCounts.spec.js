@@ -646,6 +646,7 @@ describe('SNS follower counts', () => {
             saves: 7,
             avg_watch_sec: 8.5,
             total_watch_sec: 765,
+            duration_sec: null,
           },
           {
             id: 'media-image-1',
@@ -662,6 +663,7 @@ describe('SNS follower counts', () => {
             saves: 2,
             avg_watch_sec: null,
             total_watch_sec: null,
+            duration_sec: null,
           },
         ],
         media_error: null,
@@ -857,6 +859,7 @@ describe('SNS follower counts', () => {
             saves: 7,
             avg_watch_sec: 8.5,
             total_watch_sec: 765,
+            duration_sec: 90.5,
           },
           {
             id: 'media-image-1',
@@ -930,7 +933,7 @@ describe('SNS follower counts', () => {
           'リールのキャプション',
           'https://www.instagram.com/reel/ABC/',
           1000, 900, 50, 5, 3, 7, 8.5, 765,
-          'https://example.com/thumb1.jpg',
+          'https://example.com/thumb1.jpg', 90.5,
         ],
         [
           '2026-11-09T00:00:00.000Z',
@@ -939,7 +942,7 @@ describe('SNS follower counts', () => {
           'FEED',
           '写真のキャプション',
           'https://www.instagram.com/p/DEF/',
-          100, 90, 10, 1, 0, 2, '', '', '',
+          100, 90, 10, 1, 0, 2, '', '', '', '',
         ],
       ]);
     });
@@ -1306,10 +1309,10 @@ describe('SNS follower counts', () => {
           'リールのキャプション',
           'https://www.instagram.com/reel/ABC/',
           1000, 900, 50, 5, 3, 7, 8.5, 765,
-          'https://example.com/thumb1.jpg',
+          'https://example.com/thumb1.jpg', 90.5,
         ],
         // The post outside the fresh window survives untouched
-        // (padded with an empty thumbnail cell).
+        // (padded with empty thumbnail / duration cells).
         [
           '2026-11-08T00:00:00.000Z',
           'media-old-1',
@@ -1317,7 +1320,7 @@ describe('SNS follower counts', () => {
           'FEED',
           '窓の外の投稿',
           'https://www.instagram.com/p/OLD/',
-          10, 9, 1, 0, 0, 0, '', '', '',
+          10, 9, 1, 0, 0, 0, '', '', '', '',
         ],
         [
           '2026-11-09T00:00:00.000Z',
@@ -1326,7 +1329,7 @@ describe('SNS follower counts', () => {
           'FEED',
           '写真のキャプション',
           'https://www.instagram.com/p/DEF/',
-          100, 90, 10, 1, 0, 2, '', '', '',
+          100, 90, 10, 1, 0, 2, '', '', '', '',
         ],
       ]);
     });
@@ -3582,6 +3585,7 @@ describe('SNS follower counts', () => {
         saves: 7,
         avg_watch_sec: 8.5,
         total_watch_sec: 765,
+        duration_sec: null,
       });
     });
 
@@ -3682,6 +3686,245 @@ describe('SNS follower counts', () => {
         })
       ).toEqual({ saves: 3, avg_watch_sec: 12.3, total_watch_sec: 1 });
       expect(Code.parseMediaInsights_(null)).toEqual({});
+    });
+  });
+
+  describe('Media duration (mvhd)', () => {
+    const reel = MEDIA_LIST[0];
+    const u32be = (n) => [
+      (n >>> 24) & 0xff,
+      (n >>> 16) & 0xff,
+      (n >>> 8) & 0xff,
+      n & 0xff,
+    ];
+    const asciiBytes = (text) => [...text].map((ch) => ch.charCodeAt(0));
+
+    // A synthetic mvhd box: size, 'mvhd', then the versioned
+    // body (timestamps, timescale, duration).
+    const mvhdBox = (version, timescale, duration) => {
+      const body =
+        version === 1
+          ? [
+              1, 0, 0, 0,
+              ...u32be(0), ...u32be(0),
+              ...u32be(0), ...u32be(0),
+              ...u32be(timescale),
+              ...u32be(Math.floor(duration / 4294967296)),
+              ...u32be(duration % 4294967296),
+            ]
+          : [
+              0, 0, 0, 0,
+              ...u32be(0), ...u32be(0),
+              ...u32be(timescale), ...u32be(duration),
+            ];
+      return [...u32be(body.length + 8), ...asciiBytes('mvhd'), ...body];
+    };
+
+    // ftyp, then filler bytes (mdat payload), then moov > mvhd.
+    const mp4WithMvhd = (mvhd, fillerBytes) => [
+      ...u32be(24), ...asciiBytes('ftyp'), ...asciiBytes('isom'),
+      ...u32be(0), ...asciiBytes('isom'), ...asciiBytes('iso2'),
+      ...new Array(fillerBytes || 0).fill(0),
+      ...u32be(mvhd.length + 8), ...asciiBytes('moov'), ...mvhd,
+    ];
+
+    const binRes = (status, bytes) => ({
+      getResponseCode: () => status,
+      getContent: () => bytes,
+      getContentText: () => '',
+    });
+
+    it('parses a version 0 mvhd', () => {
+      const bytes = mp4WithMvhd(mvhdBox(0, 1000, 90500), 64);
+      expect(Code.parseMp4DurationSec_(bytes)).toBe(90.5);
+    });
+
+    it('parses a version 1 mvhd (64-bit duration)', () => {
+      const bytes = mp4WithMvhd(mvhdBox(1, 90000, 90000 * 12 + 27000), 64);
+      expect(Code.parseMp4DurationSec_(bytes)).toBe(12.3);
+    });
+
+    it('finds mvhd when moov sits behind a large mdat', () => {
+      const bytes = mp4WithMvhd(mvhdBox(0, 600, 600 * 45), 600 * 1024);
+      expect(Code.parseMp4DurationSec_(bytes)).toBe(45);
+    });
+
+    it('parses signed bytes, as Apps Script hands them back', () => {
+      const bytes = mp4WithMvhd(mvhdBox(0, 1000, 90500), 64).map((b) =>
+        b > 127 ? b - 256 : b
+      );
+      expect(Code.parseMp4DurationSec_(bytes)).toBe(90.5);
+    });
+
+    it('returns null without a plausible mvhd', () => {
+      expect(Code.parseMp4DurationSec_(null)).toBeNull();
+      expect(Code.parseMp4DurationSec_([])).toBeNull();
+      expect(
+        Code.parseMp4DurationSec_(mp4WithMvhd([], 128))
+      ).toBeNull();
+      // An mvhd with a zero timescale is a false hit, not a length.
+      expect(
+        Code.parseMp4DurationSec_(mp4WithMvhd(mvhdBox(0, 0, 1000), 64))
+      ).toBeNull();
+      // An unknown mvhd version is skipped the same way.
+      const badVersion = mvhdBox(0, 1000, 5000);
+      badVersion[8] = 3;
+      expect(
+        Code.parseMp4DurationSec_(mp4WithMvhd(badVersion, 64))
+      ).toBeNull();
+    });
+
+    it('fetches the head range first and stops when mvhd is there', () => {
+      const bytes = mp4WithMvhd(mvhdBox(0, 1000, 90500), 64);
+      const ranges = [];
+      fetchHandler = (url, options) => {
+        ranges.push(options.headers.Range);
+        return binRes(206, bytes);
+      };
+      expect(Code.fetchMediaDurationSec_('https://example.com/v.mp4')).toBe(
+        90.5
+      );
+      expect(ranges).toEqual(['bytes=0-524287']);
+    });
+
+    it('falls back to the tail range when the head has no mvhd', () => {
+      const head = mp4WithMvhd([], 1024);
+      const tail = mp4WithMvhd(mvhdBox(1, 1000, 12300), 64);
+      const ranges = [];
+      fetchHandler = (url, options) => {
+        ranges.push(options.headers.Range);
+        return binRes(206, ranges.length === 1 ? head : tail);
+      };
+      expect(Code.fetchMediaDurationSec_('https://example.com/v.mp4')).toBe(
+        12.3
+      );
+      expect(ranges).toEqual(['bytes=0-524287', 'bytes=-524288']);
+    });
+
+    it('returns null on HTTP errors and fetch exceptions', () => {
+      fetchHandler = () => binRes(404, []);
+      expect(Code.fetchMediaDurationSec_('https://example.com/v.mp4')).toBeNull();
+      fetchHandler = () => {
+        throw new Error('network exploded');
+      };
+      expect(Code.fetchMediaDurationSec_('https://example.com/v.mp4')).toBeNull();
+    });
+
+    it('resolves stored durations first and skips non-videos', () => {
+      fetchHandler = () => {
+        throw new Error('must not fetch');
+      };
+      expect(
+        Code.resolveMediaDurationSec_(
+          { id: 'm1', media_type: 'VIDEO', media_product_type: 'REELS', media_url: 'https://example.com/v.mp4' },
+          { m1: 33.3 }
+        )
+      ).toBe(33.3);
+      expect(
+        Code.resolveMediaDurationSec_(
+          { id: 'm2', media_type: 'IMAGE', media_product_type: 'FEED', media_url: 'https://example.com/i.jpg' },
+          {}
+        )
+      ).toBeNull();
+      expect(
+        Code.resolveMediaDurationSec_(
+          { id: 'm3', media_type: 'VIDEO', media_product_type: 'REELS' },
+          {}
+        )
+      ).toBeNull();
+      expect(Code.resolveMediaDurationSec_(null, {})).toBeNull();
+    });
+
+    // A minimal read-only history spreadsheet holding one media
+    // tab, in the shape readSnsHistoryRows_ consumes.
+    const serveMediaTab = (dataRows) => {
+      const rows = [Code.SNS_HISTORY_MEDIA_COLUMNS.slice(), ...dataRows];
+      const sheet = {
+        rows,
+        getLastRow: () => rows.length,
+        getRange: (row, col, numRows, numCols) => ({
+          getValues: () => {
+            const out = [];
+            for (let i = 0; i < numRows; i++) {
+              const source = rows[row - 1 + i] || [];
+              out.push(source.slice(col - 1, col - 1 + numCols));
+            }
+            return out;
+          },
+          setValues: () => {},
+        }),
+      };
+      global.SpreadsheetApp = {
+        openById: vi.fn(() => ({
+          getSheetByName: (name) => (name === 'media' ? sheet : null),
+          insertSheet: () => sheet,
+        })),
+      };
+      store.SNS_HISTORY_SHEET_ID = 'history-sheet-id';
+    };
+
+    const mediaRow = (values) => {
+      const row = Code.SNS_HISTORY_MEDIA_COLUMNS.map(() => '');
+      for (const [name, value] of Object.entries(values)) {
+        row[Code.SNS_HISTORY_MEDIA_COLUMNS.indexOf(name)] = value;
+      }
+      return row;
+    };
+
+    it('reads stored durations from the media tab', () => {
+      serveMediaTab([
+        mediaRow({ media_id: 'm1', duration_sec: 33.3 }),
+        mediaRow({ media_id: 'm2', duration_sec: '' }),
+        mediaRow({ media_id: '', duration_sec: 10 }),
+      ]);
+      expect(Code.readStoredMediaDurations_()).toEqual({ m1: 33.3 });
+    });
+
+    it('reads no stored durations while the history is unconfigured', () => {
+      delete global.SpreadsheetApp;
+      expect(Code.readStoredMediaDurations_()).toEqual({});
+    });
+
+    it('measures a new reel during collection and reuses stored lengths', () => {
+      store.META_ACCESS_TOKEN = 'meta-token';
+      serveMediaTab([
+        mediaRow({ media_id: 'media-reel-stored', duration_sec: 33.3 }),
+      ]);
+      const mp4 = mp4WithMvhd(mvhdBox(0, 1000, 90500), 64);
+      const fetched = [];
+      fetchHandler = (url, options) => {
+        fetched.push(url);
+        if (url.includes('/media?')) {
+          return res(200, {
+            data: [
+              Object.assign({}, reel, {
+                id: 'media-reel-stored',
+                media_url: 'https://example.com/stored.mp4',
+              }),
+              Object.assign({}, reel, {
+                id: 'media-reel-new',
+                media_url: 'https://example.com/new.mp4',
+              }),
+            ],
+          });
+        }
+        if (url.includes('/insights')) {
+          return res(200, mediaInsightsBody([['likes', 1]]));
+        }
+        if (url === 'https://example.com/new.mp4') {
+          return binRes(206, mp4);
+        }
+        throw new Error('unexpected url: ' + url);
+      };
+      const { recent_media, media_error } = Code.fetchInstagramRecentMedia_();
+      expect(media_error).toBeNull();
+      expect(recent_media.map((entry) => entry.duration_sec)).toEqual([
+        33.3,
+        90.5,
+      ]);
+      // The stored reel's file is never fetched again.
+      expect(fetched).not.toContain('https://example.com/stored.mp4');
+      expect(fetched).toContain('https://example.com/new.mp4');
     });
   });
 
