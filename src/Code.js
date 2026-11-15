@@ -2951,9 +2951,11 @@ function fetchInstagramRecentMedia_() {
       media_error: 'media list: response had no media array',
     };
   }
+  const storedDurations = readStoredMediaDurations_();
   const failures = [];
   const recentMedia = items.slice(0, SNS_RECENT_MEDIA_LIMIT).map((media) => {
     const entry = buildRecentMediaEntry_(media);
+    entry.duration_sec = resolveMediaDurationSec_(media, storedDurations);
     const insights = fetchMediaInsights_(media, token);
     if (insights.error) {
       failures.push(insights.error);
@@ -3007,6 +3009,7 @@ function buildRecentMediaEntry_(media) {
     saves: null,
     avg_watch_sec: null,
     total_watch_sec: null,
+    duration_sec: null,
   };
 }
 
@@ -3103,6 +3106,183 @@ function parseMediaInsights_(data) {
     }
   });
   return values;
+}
+
+// --- Media duration (the video's own length) ---
+//
+// Neither the media object nor its insights carry the video's
+// length, so the duration comes from the MP4 file itself: the
+// mvhd box inside moov holds the movie's timescale and
+// duration. A length never changes once a post exists, so the
+// collection first reuses the value the media tab already
+// stores for the post and only fetches files for videos it has
+// never measured — that keeps the extra UrlFetch calls (and
+// the 6-minute execution budget) bounded to the genuinely new
+// videos of each run.
+
+const MEDIA_DURATION_PROBE_BYTES = 512 * 1024;
+// Sanity bound for a parsed mvhd: anything longer is treated
+// as a false "mvhd" hit inside compressed media data.
+const MEDIA_DURATION_MAX_SEC = 24 * 60 * 60;
+
+// The media tab's stored durations as { media_id: seconds }.
+// Best-effort: any failure (history unconfigured, tab missing,
+// sheet unreadable) yields an empty map and the collection
+// simply measures what it can.
+function readStoredMediaDurations_() {
+  const durations = {};
+  try {
+    const spreadsheet = openHistorySpreadsheet_();
+    if (!spreadsheet) {
+      return durations;
+    }
+    const rows = readHistoryTabObjects_(
+      spreadsheet,
+      'media',
+      SNS_HISTORY_MEDIA_COLUMNS
+    );
+    if (!rows) {
+      return durations;
+    }
+    rows.forEach((row) => {
+      const id = historyTextOrNull_(row.media_id);
+      const sec = snsNumberOrNull_(row.duration_sec);
+      if (id && sec !== null) {
+        durations[id] = sec;
+      }
+    });
+  } catch (err) {
+    // Durations are a cache, never a collection blocker.
+  }
+  return durations;
+}
+
+// One media's duration in seconds: the stored value when the
+// tab already has one, a fresh measurement for a video (reels
+// and feed videos) whose file URL is known, otherwise null
+// (photos, carousels and failed measurements alike).
+function resolveMediaDurationSec_(media, storedDurations) {
+  if (!media || media.id == null) {
+    return null;
+  }
+  const stored = (storedDurations || {})[String(media.id)];
+  if (typeof stored === 'number' && Number.isFinite(stored)) {
+    return stored;
+  }
+  const isVideo =
+    media.media_product_type === 'REELS' || media.media_type === 'VIDEO';
+  if (!isVideo || !media.media_url) {
+    return null;
+  }
+  return fetchMediaDurationSec_(media.media_url);
+}
+
+// Measures one MP4's length by fetching its head (reels keep
+// moov up front) and, when no mvhd turns up there, its tail
+// (moov can sit behind mdat instead). Each fetch asks for a
+// 512KB range; a server that ignores Range and returns the
+// whole file still parses, because the parser only scans the
+// bytes it was handed. Any failure returns null.
+function fetchMediaDurationSec_(mediaUrl) {
+  const head = fetchMediaByteRange_(
+    mediaUrl,
+    'bytes=0-' + (MEDIA_DURATION_PROBE_BYTES - 1)
+  );
+  const fromHead = head ? parseMp4DurationSec_(head) : null;
+  if (fromHead !== null) {
+    return fromHead;
+  }
+  const tail = fetchMediaByteRange_(
+    mediaUrl,
+    'bytes=-' + MEDIA_DURATION_PROBE_BYTES
+  );
+  return tail ? parseMp4DurationSec_(tail) : null;
+}
+
+// One ranged GET of a media file, returning the raw bytes or
+// null. Only 200 / 206 count as success; the CDN redirect is
+// followed by UrlFetchApp itself.
+function fetchMediaByteRange_(mediaUrl, range) {
+  let res;
+  try {
+    res = UrlFetchApp.fetch(mediaUrl, {
+      muteHttpExceptions: true,
+      headers: { Range: range },
+    });
+  } catch (err) {
+    return null;
+  }
+  const status = res.getResponseCode();
+  if (status !== 200 && status !== 206) {
+    return null;
+  }
+  try {
+    const content = res.getContent();
+    return content && content.length ? content : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+// The pure parser: scans a byte array (signed, as Apps Script
+// hands back, or unsigned) for the mvhd box and returns the
+// movie length in seconds to 0.1s — the same precision
+// avg_watch_sec is stored at — or null when no plausible mvhd
+// is present. mvhd layout after the type: version/flags
+// (4 bytes), then for version 1 two 64-bit timestamps, a
+// 32-bit timescale and a 64-bit duration; for version 0 the
+// same fields at 32 bits each.
+function parseMp4DurationSec_(bytes) {
+  if (!bytes || bytes.length < 24) {
+    return null;
+  }
+  const u8 = (index) => bytes[index] & 0xff;
+  const u32 = (index) =>
+    ((u8(index) * 256 + u8(index + 1)) * 256 + u8(index + 2)) * 256 +
+    u8(index + 3);
+  // 'mvhd'
+  for (let i = 0; i + 4 <= bytes.length; i++) {
+    if (
+      u8(i) !== 0x6d ||
+      u8(i + 1) !== 0x76 ||
+      u8(i + 2) !== 0x68 ||
+      u8(i + 3) !== 0x64
+    ) {
+      continue;
+    }
+    const content = i + 4;
+    const version = u8(content);
+    let timescale;
+    let duration;
+    if (version === 1) {
+      if (content + 32 > bytes.length) {
+        continue;
+      }
+      timescale = u32(content + 20);
+      duration = u32(content + 24) * 4294967296 + u32(content + 28);
+    } else if (version === 0) {
+      if (content + 20 > bytes.length) {
+        continue;
+      }
+      timescale = u32(content + 12);
+      duration = u32(content + 16);
+    } else {
+      continue;
+    }
+    if (!timescale || !duration) {
+      continue;
+    }
+    const seconds = duration / timescale;
+    if (
+      !Number.isFinite(seconds) ||
+      seconds < 0.1 ||
+      seconds > MEDIA_DURATION_MAX_SEC
+    ) {
+      continue;
+    }
+    return Math.round(seconds * 10) / 10;
+  }
+  return null;
 }
 
 // YouTube advanced-service errors carry API messages (no secrets),
@@ -3291,6 +3471,13 @@ const SNS_HISTORY_MEDIA_COLUMNS = [
   // rows are read positionally against this list, so a new column
   // may only ever join at the end.
   'thumbnail_url',
+  // The video's own length in seconds (reels / videos only),
+  // appended after thumbnail_url under the same rule. The Graph
+  // API exposes no duration field, so the collection reads it
+  // from the MP4's mvhd box (see fetchMediaDurationSec_); a
+  // stored value is carried over by later collections and never
+  // re-fetched.
+  'duration_sec',
 ];
 // The upserted tabs. "daily" is keyed by its first column (date);
 // the post tabs are keyed by their second column (the id), right
@@ -3547,6 +3734,7 @@ function buildSnsHistoryMediaRows_(snapshot) {
       snsHistoryNumCell_(item.avg_watch_sec),
       snsHistoryNumCell_(item.total_watch_sec),
       snsHistoryTextCell_(item.thumbnail_url),
+      snsHistoryNumCell_(item.duration_sec),
     ];
   });
 }
@@ -5381,6 +5569,7 @@ function buildSnsDetailFromSheet_(openedSpreadsheet) {
         saves: num(row.saves),
         avg_watch_sec: num(row.avg_watch_sec),
         total_watch_sec: num(row.total_watch_sec),
+        duration_sec: num(row.duration_sec),
       }))
       .filter((entry) => entry.id)
       .sort((a, b) => compareTimestampDesc_(a.posted_at, b.posted_at))
@@ -6607,6 +6796,10 @@ if (typeof exports !== 'undefined') {
   exports.fetchInstagramDemographics_ = fetchInstagramDemographics_;
   exports.parseDemographicsBreakdown_ = parseDemographicsBreakdown_;
   exports.fetchInstagramRecentMedia_ = fetchInstagramRecentMedia_;
+  exports.readStoredMediaDurations_ = readStoredMediaDurations_;
+  exports.resolveMediaDurationSec_ = resolveMediaDurationSec_;
+  exports.fetchMediaDurationSec_ = fetchMediaDurationSec_;
+  exports.parseMp4DurationSec_ = parseMp4DurationSec_;
   exports.fetchMediaInsights_ = fetchMediaInsights_;
   exports.parseMediaInsights_ = parseMediaInsights_;
   exports.fetchYouTubeChannelDetail_ = fetchYouTubeChannelDetail_;
