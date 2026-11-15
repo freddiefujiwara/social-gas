@@ -3351,64 +3351,59 @@ function parseMp4DurationSec_(bytes) {
   return Math.round(seconds * 10) / 10;
 }
 
-// --- Manual diagnostics: debugMediaDuration -------------------
+// --- Manual diagnostics: debugMediaDuration / debugMediaDurationMissing ---
 // Run by hand from the Apps Script editor when duration_sec
 // stays null for a post (as on 2026-11-15, when the first
 // production collection measured only 2 of the newest 30
 // videos — the two long song reels — and the fragmented-MP4
-// mehd fallback followed). Call it with the media_id to
-// inspect; with no argument it probes the newest video in the
-// recent media list, which is the form the editor's Run
-// button can use. For each Range probe (head, then tail) it
-// logs the HTTP status, the byte count, which of the
-// moov / mvhd / mvex / mehd byte patterns appear, the raw
-// mvhd timescale / duration and mehd duration the inspector
-// read, and the parse result — so the next fix starts from
-// what Instagram actually serves instead of a guess. It is
-// never called from a trigger, doGet or the collection, and
-// it does not touch the snapshot or the sheet. The media_url
-// (a signed CDN URL) and the access token are never logged.
+// mehd fallback followed). debugMediaDuration inspects one
+// post: call it with the media_id to inspect; with no argument
+// it probes the newest video in the recent media list, which
+// is the form the editor's Run button can use.
+// debugMediaDurationMissing inspects the posts that are
+// actually unmeasured: it reads the media tab the way the
+// collection does, takes up to five REELS / VIDEO rows whose
+// duration_sec is still empty, and runs the same diagnosis on
+// each — the no-argument auto-pick above can land on a post
+// that already has a duration (it did on 2026-11-15: it picked
+// a measured song reel and showed a healthy pipeline), which
+// says nothing about the posts that fail. For each Range
+// probe (head, then tail) the diagnosis logs the HTTP status,
+// the byte count, which of the moov / mvhd / mvex / mehd byte
+// patterns appear, the raw mvhd timescale / duration and mehd
+// duration the inspector read, and the parse result — so the
+// next fix starts from what Instagram actually serves instead
+// of a guess. Neither function is ever called from a trigger,
+// doGet or the collection, and neither touches the snapshot
+// or the sheet. The media_url (a signed CDN URL) and the
+// access token are never logged.
 function debugMediaDuration(mediaId) {
   const token = getScriptProperty_('META_ACCESS_TOKEN');
   if (!token) {
     Logger.log('META_ACCESS_TOKEN is not set; nothing to diagnose.');
     return;
   }
-  const listRes = fetchInsightsJson_(
-    META_GRAPH_BASE +
-      SNS_INSTAGRAM_MAIN_ID +
-      '/media?fields=id,media_type,media_product_type,permalink,media_url&limit=' +
-      SNS_RECENT_MEDIA_LIMIT +
-      '&access_token=' +
-      encodeURIComponent(token)
-  );
-  if (listRes.error) {
-    Logger.log('media list failed: ' + listRes.error);
+  const list = debugFetchMediaList_(token);
+  if (list.error) {
+    Logger.log('media list failed: ' + list.error);
     return;
   }
-  const items =
-    listRes.data && Array.isArray(listRes.data.data) ? listRes.data.data : [];
+  const items = list.items;
   let media = null;
   if (mediaId != null && String(mediaId) !== '') {
     media =
       items.find((item) => item && String(item.id) === String(mediaId)) ||
       null;
     if (!media) {
-      const oneRes = fetchInsightsJson_(
-        META_GRAPH_BASE +
-          encodeURIComponent(String(mediaId)) +
-          '?fields=id,media_type,media_product_type,permalink,media_url' +
-          '&access_token=' +
-          encodeURIComponent(token)
-      );
-      if (oneRes.error) {
+      const one = debugFetchMediaById_(mediaId, token);
+      if (one.error) {
         Logger.log(
           'media ' + mediaId + ' not in the recent list; direct fetch failed: ' +
-            oneRes.error
+            one.error
         );
         return;
       }
-      media = oneRes.data;
+      media = one.media;
     }
   } else {
     media =
@@ -3431,6 +3426,53 @@ function debugMediaDuration(mediaId) {
     Logger.log('media has no media_url to probe.');
     return;
   }
+  debugLogMediaDurationProbes_(media);
+}
+
+// The recent media list for the debug functions, as
+// { items, error }: items is the media array (possibly empty)
+// on success, error the fetchInsightsJson_ error text.
+function debugFetchMediaList_(token) {
+  const listRes = fetchInsightsJson_(
+    META_GRAPH_BASE +
+      SNS_INSTAGRAM_MAIN_ID +
+      '/media?fields=id,media_type,media_product_type,permalink,media_url&limit=' +
+      SNS_RECENT_MEDIA_LIMIT +
+      '&access_token=' +
+      encodeURIComponent(token)
+  );
+  if (listRes.error) {
+    return { items: null, error: listRes.error };
+  }
+  return {
+    items:
+      listRes.data && Array.isArray(listRes.data.data) ? listRes.data.data : [],
+    error: null,
+  };
+}
+
+// One media object fetched directly by id, as { media, error },
+// for posts that have aged out of the recent media list.
+function debugFetchMediaById_(mediaId, token) {
+  const oneRes = fetchInsightsJson_(
+    META_GRAPH_BASE +
+      encodeURIComponent(String(mediaId)) +
+      '?fields=id,media_type,media_product_type,permalink,media_url' +
+      '&access_token=' +
+      encodeURIComponent(token)
+  );
+  if (oneRes.error) {
+    return { media: null, error: oneRes.error };
+  }
+  return { media: oneRes.data, error: null };
+}
+
+// The per-media diagnosis both debug entry points share: the
+// header line, the head / tail Range probes with their HTTP
+// status, byte count, box patterns and raw header fields, the
+// parse result, and the collection path's own result for
+// comparison.
+function debugLogMediaDurationProbes_(media) {
   Logger.log(
     '=== debugMediaDuration: media ' +
       media.id +
@@ -3495,10 +3537,147 @@ function debugMediaDuration(mediaId) {
   );
 }
 
-// One ranged GET for debugMediaDuration, reporting the HTTP
-// status alongside the bytes ({ status, bytes }; status is
-// null when the fetch itself threw, bytes null unless the
-// status was 200 / 206). Never throws.
+// How many unmeasured videos debugMediaDurationMissing probes
+// in one run: enough to see the pattern across posts, few
+// enough to stay well inside the execution budget (each post
+// costs up to four ranged fetches plus its media fetch).
+const DEBUG_MEDIA_DURATION_MISSING_LIMIT = 5;
+
+// The media tab's unmeasured videos, as [{ media_id, type }]
+// in tab order: rows whose type is one the collection tries
+// to measure (REELS / VIDEO) and whose duration_sec cell
+// holds no number yet — the same cell reading
+// readStoredMediaDurations_ applies. Pure, so the selection
+// is testable without a sheet.
+function selectUnmeasuredDurationMediaRows_(rows, limit) {
+  const cap =
+    typeof limit === 'number' && limit > 0
+      ? Math.floor(limit)
+      : DEBUG_MEDIA_DURATION_MISSING_LIMIT;
+  const selected = [];
+  (rows || []).forEach((row) => {
+    if (!row || selected.length >= cap) {
+      return;
+    }
+    const mediaId = historyTextOrNull_(row.media_id);
+    const type = historyTextOrNull_(row.type);
+    if (!mediaId || (type !== 'REELS' && type !== 'VIDEO')) {
+      return;
+    }
+    if (snsNumberOrNull_(row.duration_sec) !== null) {
+      return;
+    }
+    selected.push({ media_id: mediaId, type });
+  });
+  return selected;
+}
+
+// Manual diagnosis for the posts whose duration_sec is still
+// missing (see the section header above). Reads the media tab
+// the way the collection does, then diagnoses each selected
+// post in turn; one post's failure is logged and never stops
+// the rest. The media_url for each post comes from the Graph
+// API (the tab does not store it): the recent media list
+// first, a direct fetch by id for posts no longer in it.
+function debugMediaDurationMissing() {
+  let rows = null;
+  try {
+    const spreadsheet = openHistorySpreadsheet_();
+    if (!spreadsheet) {
+      Logger.log('SNS_HISTORY_SHEET_ID is not set; nothing to diagnose.');
+      return;
+    }
+    rows = readHistoryTabObjects_(
+      spreadsheet,
+      'media',
+      SNS_HISTORY_MEDIA_COLUMNS
+    );
+  } catch (err) {
+    Logger.log(
+      'media tab could not be read: ' +
+        String((err && err.message) || err).slice(0, 200)
+    );
+    return;
+  }
+  if (!rows) {
+    Logger.log('the media tab does not exist; nothing to diagnose.');
+    return;
+  }
+  const targets = selectUnmeasuredDurationMediaRows_(
+    rows,
+    DEBUG_MEDIA_DURATION_MISSING_LIMIT
+  );
+  if (!targets.length) {
+    Logger.log(
+      'no REELS / VIDEO rows without a duration_sec in the media tab.'
+    );
+    return;
+  }
+  const token = getScriptProperty_('META_ACCESS_TOKEN');
+  if (!token) {
+    Logger.log('META_ACCESS_TOKEN is not set; nothing to diagnose.');
+    return;
+  }
+  const byId = {};
+  const list = debugFetchMediaList_(token);
+  if (list.error) {
+    Logger.log(
+      'media list failed: ' +
+        list.error +
+        ' (diagnosing via direct fetches instead)'
+    );
+  } else {
+    list.items.forEach((item) => {
+      if (item && item.id != null) {
+        byId[String(item.id)] = item;
+      }
+    });
+  }
+  Logger.log(
+    '=== debugMediaDurationMissing: ' +
+      targets.length +
+      ' unmeasured video(s) ==='
+  );
+  targets.forEach((target, index) => {
+    Logger.log(
+      '--- [' +
+        (index + 1) +
+        '/' +
+        targets.length +
+        '] media_id=' +
+        target.media_id +
+        ' type=' +
+        target.type +
+        ' ---'
+    );
+    try {
+      let media = byId[target.media_id] || null;
+      if (!media) {
+        const one = debugFetchMediaById_(target.media_id, token);
+        if (one.error) {
+          Logger.log('direct fetch failed: ' + one.error);
+          return;
+        }
+        media = one.media;
+      }
+      if (!media || !media.media_url) {
+        Logger.log('media has no media_url to probe.');
+        return;
+      }
+      debugLogMediaDurationProbes_(media);
+    } catch (err) {
+      Logger.log(
+        'diagnosis failed: ' +
+          String((err && err.message) || err).slice(0, 200)
+      );
+    }
+  });
+}
+
+// One ranged GET for the duration debug functions, reporting
+// the HTTP status alongside the bytes ({ status, bytes };
+// status is null when the fetch itself threw, bytes null
+// unless the status was 200 / 206). Never throws.
 function debugProbeMediaRange_(mediaUrl, range) {
   let res;
   try {
@@ -7038,6 +7217,9 @@ if (typeof exports !== 'undefined') {
   exports.parseMp4DurationSec_ = parseMp4DurationSec_;
   exports.inspectMp4Headers_ = inspectMp4Headers_;
   exports.debugMediaDuration = debugMediaDuration;
+  exports.selectUnmeasuredDurationMediaRows_ =
+    selectUnmeasuredDurationMediaRows_;
+  exports.debugMediaDurationMissing = debugMediaDurationMissing;
   exports.fetchMediaInsights_ = fetchMediaInsights_;
   exports.parseMediaInsights_ = parseMediaInsights_;
   exports.fetchYouTubeChannelDetail_ = fetchYouTubeChannelDetail_;
