@@ -4056,6 +4056,204 @@ describe('SNS follower counts', () => {
       expect(fetched).not.toContain('https://example.com/stored.mp4');
       expect(fetched).toContain('https://example.com/new.mp4');
     });
+
+    it('selects only unmeasured REELS / VIDEO rows for the missing-duration diagnosis', () => {
+      const rows = [
+        { media_id: 'm1', type: 'REELS', duration_sec: '' },
+        { media_id: 'm2', type: 'REELS', duration_sec: 104.3 },
+        { media_id: 'm3', type: 'FEED', duration_sec: '' },
+        { media_id: 'm4', type: 'VIDEO', duration_sec: null },
+        { media_id: '', type: 'REELS', duration_sec: '' },
+        { media_id: 'm5', type: 'CAROUSEL_ALBUM', duration_sec: '' },
+        { media_id: 'm6', type: 'VIDEO', duration_sec: '' },
+      ];
+      expect(Code.selectUnmeasuredDurationMediaRows_(rows, 5)).toEqual([
+        { media_id: 'm1', type: 'REELS' },
+        { media_id: 'm4', type: 'VIDEO' },
+        { media_id: 'm6', type: 'VIDEO' },
+      ]);
+      expect(Code.selectUnmeasuredDurationMediaRows_(rows, 1)).toEqual([
+        { media_id: 'm1', type: 'REELS' },
+      ]);
+      expect(Code.selectUnmeasuredDurationMediaRows_(null, 5)).toEqual([]);
+      expect(Code.selectUnmeasuredDurationMediaRows_([], 5)).toEqual([]);
+    });
+
+    it('debugMediaDurationMissing diagnoses the unmeasured videos from the media tab', () => {
+      store.META_ACCESS_TOKEN = 'meta-token';
+      serveMediaTab([
+        mediaRow({
+          media_id: 'media-reel-measured',
+          type: 'REELS',
+          duration_sec: 104.3,
+        }),
+        mediaRow({ media_id: 'media-reel-missing', type: 'REELS' }),
+        mediaRow({ media_id: 'media-image-1', type: 'FEED' }),
+        mediaRow({ media_id: 'media-video-missing', type: 'VIDEO' }),
+      ]);
+      const logs = [];
+      global.Logger = { log: vi.fn((line) => logs.push(String(line))) };
+      const bytes = mp4WithHeaders(mvhdBox(0, 1000, 0), mehdBox(0, 90500), 64);
+      fetchHandler = (url) => {
+        if (url.includes('/media?fields=')) {
+          return res(200, {
+            data: [
+              {
+                id: 'media-reel-missing',
+                media_type: 'VIDEO',
+                media_product_type: 'REELS',
+                media_url: 'https://example.com/missing.mp4',
+              },
+            ],
+          });
+        }
+        if (url.includes('/media-video-missing?fields=')) {
+          return res(200, {
+            id: 'media-video-missing',
+            media_type: 'VIDEO',
+            media_url: 'https://example.com/video.mp4',
+          });
+        }
+        return binRes(206, bytes);
+      };
+      try {
+        Code.debugMediaDurationMissing();
+      } finally {
+        delete global.Logger;
+      }
+      const text = logs.join('\n');
+      expect(text).toContain(
+        'debugMediaDurationMissing: 2 unmeasured video(s)'
+      );
+      expect(text).toContain('media_id=media-reel-missing type=REELS');
+      expect(text).toContain('media_id=media-video-missing type=VIDEO');
+      expect(text).not.toContain('media-reel-measured');
+      expect(text).not.toContain('media-image-1');
+      expect(text).toContain('status: 206');
+      expect(text).toContain('mvhd: version=0 timescale=1000 duration=0');
+      expect(text).toContain('mehd: version=0 duration=90500');
+      expect(text).toContain('parse result: 90.5 sec');
+      expect(text).toContain(
+        'fetchMediaDurationSec_ (the collection path): 90.5 sec'
+      );
+      // Neither the token nor any media_url reaches the log.
+      expect(text).not.toContain('meta-token');
+      expect(text).not.toContain('example.com');
+    });
+
+    it('debugMediaDurationMissing keeps going when one media cannot be fetched', () => {
+      store.META_ACCESS_TOKEN = 'meta-token';
+      serveMediaTab([
+        mediaRow({ media_id: 'media-gone', type: 'REELS' }),
+        mediaRow({ media_id: 'media-reel-ok', type: 'REELS' }),
+      ]);
+      const logs = [];
+      global.Logger = { log: vi.fn((line) => logs.push(String(line))) };
+      const bytes = mp4WithMvhd(mvhdBox(0, 1000, 90500), 64);
+      fetchHandler = (url) => {
+        if (url.includes('/media?fields=')) {
+          return res(200, {
+            data: [
+              {
+                id: 'media-reel-ok',
+                media_type: 'VIDEO',
+                media_product_type: 'REELS',
+                media_url: 'https://example.com/ok.mp4',
+              },
+            ],
+          });
+        }
+        if (url.includes('/media-gone?fields=')) {
+          return res(400, {
+            error: { message: 'media gone', code: 100 },
+          });
+        }
+        return binRes(206, bytes);
+      };
+      try {
+        Code.debugMediaDurationMissing();
+      } finally {
+        delete global.Logger;
+      }
+      const text = logs.join('\n');
+      expect(text).toContain('direct fetch failed: HTTP 400');
+      expect(text).toContain('media_id=media-reel-ok type=REELS');
+      expect(text).toContain('parse result: 90.5 sec');
+    });
+
+    it('debugMediaDurationMissing logs an exception for one media and continues', () => {
+      store.META_ACCESS_TOKEN = 'meta-token';
+      serveMediaTab([
+        mediaRow({ media_id: 'media-boom', type: 'REELS' }),
+        mediaRow({ media_id: 'media-reel-ok', type: 'REELS' }),
+      ]);
+      const logs = [];
+      global.Logger = { log: vi.fn((line) => logs.push(String(line))) };
+      const bytes = mp4WithMvhd(mvhdBox(0, 1000, 90500), 64);
+      fetchHandler = (url) => {
+        if (url.includes('/media?fields=')) {
+          return res(200, {
+            data: [
+              {
+                id: 'media-reel-ok',
+                media_type: 'VIDEO',
+                media_product_type: 'REELS',
+                media_url: 'https://example.com/ok.mp4',
+              },
+            ],
+          });
+        }
+        if (url.includes('/media-boom?fields=')) {
+          return {
+            getResponseCode: () => 200,
+            getContentText: () => {
+              throw new Error('boom');
+            },
+          };
+        }
+        return binRes(206, bytes);
+      };
+      try {
+        Code.debugMediaDurationMissing();
+      } finally {
+        delete global.Logger;
+      }
+      const text = logs.join('\n');
+      expect(text).toContain('diagnosis failed: boom');
+      expect(text).toContain('media_id=media-reel-ok type=REELS');
+      expect(text).toContain('parse result: 90.5 sec');
+    });
+
+    it('debugMediaDurationMissing reports when nothing is unmeasured', () => {
+      store.META_ACCESS_TOKEN = 'meta-token';
+      serveMediaTab([
+        mediaRow({ media_id: 'm1', type: 'REELS', duration_sec: 10 }),
+        mediaRow({ media_id: 'm2', type: 'FEED' }),
+      ]);
+      const logs = [];
+      global.Logger = { log: vi.fn((line) => logs.push(String(line))) };
+      try {
+        Code.debugMediaDurationMissing();
+      } finally {
+        delete global.Logger;
+      }
+      expect(logs.join('\n')).toContain(
+        'no REELS / VIDEO rows without a duration_sec in the media tab.'
+      );
+    });
+
+    it('debugMediaDurationMissing stops while the history is unconfigured', () => {
+      const logs = [];
+      global.Logger = { log: vi.fn((line) => logs.push(String(line))) };
+      try {
+        Code.debugMediaDurationMissing();
+      } finally {
+        delete global.Logger;
+      }
+      expect(logs.join('\n')).toContain(
+        'SNS_HISTORY_SHEET_ID is not set; nothing to diagnose.'
+      );
+    });
   });
 
   describe('YouTube detail', () => {
