@@ -117,22 +117,33 @@ describe('Performance highlights RSS', () => {
       ],
     };
 
-    it('builds the morning item from the slot snapshots', () => {
+    it('builds the morning item as a compact summary within budget', () => {
       const slots = Code.perfRssSlots_(Date.parse('2026-11-17T06:05:00+09:00'), 2);
       const item = Code.buildPerfHighlightItem_(slots[0], slots[1], data);
       expect(item.title).toBe('11月17日 朝のハイライト');
       expect(item.guid).toBe('perf-2026-11-17-morning');
       expect(item.pubDate).toBe('Mon, 16 Nov 2026 21:00:00 GMT');
-      expect(item.descriptionHtml).toContain('SNS延べフォロワー数: 4,215人（前日比 +22）');
-      expect(item.descriptionHtml).toContain('Instagram 2,105人');
-      expect(item.descriptionHtml).toContain(
-        'Instagram 過去30日の再生回数: 570,000回（前回配信から +5,302回）'
+      expect(item.descriptionText).toBe(
+        '延べ4,215人(+22) / IG2,105 Th256 YT12 X1,842 / 再生570,000回(+5,302) / ' +
+          'ブログ(11/16)48回 / X残高$39.69 / 人気記事: 記事B 250回'
       );
-      expect(item.descriptionHtml).toContain('ブログ（11月16日）: 表示 48回');
-      expect(item.descriptionHtml).toContain('よく読まれている記事: 記事B（28日で 250回）');
-      expect(item.descriptionHtml).toContain('X クレジット残高: $39.69');
-      expect(item.descriptionHtml).toContain('新規投稿: 新しいリール');
-      expect(item.descriptionHtml).not.toContain('前の投稿');
+      expect(item.descriptionText.length).toBeLessThanOrEqual(
+        Code.PERF_RSS_SUMMARY_CHARS
+      );
+      // The new-post segment is the lowest priority here and
+      // drops off when the budget runs out.
+      expect(item.descriptionText).not.toContain('新しいリール');
+      expect(item.descriptionText).not.toContain('前の投稿');
+    });
+
+    it('includes a new post when the budget has room', () => {
+      const slots = Code.perfRssSlots_(Date.parse('2026-11-17T06:05:00+09:00'), 2);
+      const item = Code.buildPerfHighlightItem_(
+        slots[0],
+        slots[1],
+        Object.assign({}, data, { blogPostRows: [] })
+      );
+      expect(item.descriptionText).toContain('新規: 新しいリール');
     });
 
     it('returns null when no snapshot predates the slot', () => {
@@ -154,13 +165,13 @@ describe('Performance highlights RSS', () => {
           title: '11月17日 朝のハイライト',
           guid: 'perf-2026-11-17-morning',
           pubDate: 'Mon, 16 Nov 2026 21:00:00 GMT',
-          descriptionHtml: 'SNS延べフォロワー数: 4,215人',
+          descriptionText: '延べ4,215人(+22)',
         },
       ]);
       expect(xml).toContain('<title>SNSハイライト（@freddiefujiwara）</title>');
       expect(xml).toContain('<guid isPermaLink="false">perf-2026-11-17-morning</guid>');
       expect(xml).toContain('<pubDate>Mon, 16 Nov 2026 21:00:00 GMT</pubDate>');
-      expect(xml).toContain('<description>SNS延べフォロワー数: 4,215人</description>');
+      expect(xml).toContain('<description>延べ4,215人(+22)</description>');
     });
 
     it('renders an empty channel for no items', () => {

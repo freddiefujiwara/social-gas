@@ -7979,10 +7979,10 @@ function perfDeltaText_(value, base) {
   return (delta > 0 ? '+' : '') + perfFormatInt_(delta);
 }
 
-// The blog line of one item: the newest completed JST day in
-// blog_daily (today's row is still a running total, so the
-// line always names a finished day).
-function perfBlogLine_(blogDailyRows, slotDateKey) {
+// The blog segment of one item: the newest completed JST
+// day in blog_daily (today's row is still a running total,
+// so the segment always names a finished day).
+function perfBlogSegment_(blogDailyRows, slotDateKey) {
   let best = null;
   (blogDailyRows || []).forEach((row) => {
     const dateKey = snsHistoryKeyCell_(row && row.date);
@@ -8002,11 +8002,11 @@ function perfBlogLine_(blogDailyRows, slotDateKey) {
   }
   const parts = best.dateKey.split('-');
   return (
-    'ブログ（' +
+    'ブログ(' +
     Number(parts[1]) +
-    '月' +
+    '/' +
     Number(parts[2]) +
-    '日）: 表示 ' +
+    ')' +
     perfFormatInt_(best.views) +
     '回'
   );
@@ -8036,7 +8036,7 @@ function perfTopBlogPost_(blogPostRows) {
 
 // The Instagram posts published inside (fromMs, toMs], as
 // one-line captions, oldest first, at most three.
-function perfNewPostLines_(mediaRows, fromMs, toMs) {
+function perfNewPostCaptions_(mediaRows, fromMs, toMs) {
   const fresh = [];
   (mediaRows || []).forEach((row) => {
     const iso = historyTimestampOrNull_(row && row.posted_at);
@@ -8051,15 +8051,34 @@ function perfNewPostLines_(mediaRows, fromMs, toMs) {
   return fresh
     .sort((a, b) => a.at - b.at)
     .slice(0, 3)
-    .map((post) => '新規投稿: ' + post.text);
+    .map((post) => post.text);
+}
+
+// The character budget of one item's summary. /reader's
+// article cards clamp the summary to three lines, which at
+// phone width holds roughly 110 characters; the segments
+// below join in priority order and the lower ones drop off
+// when the budget runs out, so the headline figures always
+// fit on the card.
+const PERF_RSS_SUMMARY_CHARS = 110;
+
+// A "(+22)" style suffix for a delta, or '' when the delta
+// is missing or zero.
+function perfDeltaSuffix_(value, base) {
+  const delta = perfDeltaText_(value, base);
+  if (!delta || delta === '0') {
+    return '';
+  }
+  return '(' + delta + ')';
 }
 
 // One highlight item for a slot, or null when no account
 // snapshot predates it. prevSlot is the chronologically
 // previous slot (the next entry of perfRssSlots_): it anchors
 // the since-last-delivery view growth and the new-posts
-// window. The description is HTML built from escaped lines;
-// buildPerfRss_ inserts it unescaped by design.
+// window. The description is one compact plain-text line
+// (see PERF_RSS_SUMMARY_CHARS); the item link already points
+// at /social, so no link is repeated in the text.
 function buildPerfHighlightItem_(slot, prevSlot, data) {
   const snap = perfSnapshotAt_(data.accountRows, slot.atMs);
   if (!snap) {
@@ -8067,62 +8086,64 @@ function buildPerfHighlightItem_(slot, prevSlot, data) {
   }
   const dayAgo = perfSnapshotAt_(data.accountRows, slot.atMs - SNS_DAY_MS);
   const prev = prevSlot ? perfSnapshotAt_(data.accountRows, prevSlot.atMs) : null;
-  const lines = [];
+  const segments = [];
   if (typeof snap.total === 'number') {
-    let line = 'SNS延べフォロワー数: ' + perfFormatInt_(snap.total) + '人';
-    const delta = dayAgo ? perfDeltaText_(snap.total, dayAgo.total) : '';
-    if (delta) {
-      line += '（前日比 ' + delta + '）';
-    }
-    lines.push(line);
+    segments.push(
+      '延べ' +
+        perfFormatInt_(snap.total) +
+        '人' +
+        (dayAgo ? perfDeltaSuffix_(snap.total, dayAgo.total) : '')
+    );
   }
   const parts = [];
   if (typeof snap.ig === 'number') {
-    parts.push('Instagram ' + perfFormatInt_(snap.ig) + '人');
+    parts.push('IG' + perfFormatInt_(snap.ig));
   }
   if (typeof snap.threads === 'number') {
-    parts.push('Threads ' + perfFormatInt_(snap.threads) + '人');
+    parts.push('Th' + perfFormatInt_(snap.threads));
   }
   if (typeof snap.youtube === 'number') {
-    parts.push('YouTube ' + perfFormatInt_(snap.youtube) + '人');
+    parts.push('YT' + perfFormatInt_(snap.youtube));
   }
   if (typeof snap.x === 'number') {
-    parts.push('X ' + perfFormatInt_(snap.x) + '人');
+    parts.push('X' + perfFormatInt_(snap.x));
   }
   if (parts.length) {
-    lines.push('内訳: ' + parts.join(' / '));
+    segments.push(parts.join(' '));
   }
   if (typeof snap.views30d === 'number') {
-    let line =
-      'Instagram 過去30日の再生回数: ' + perfFormatInt_(snap.views30d) + '回';
-    const delta = prev ? perfDeltaText_(snap.views30d, prev.views30d) : '';
-    if (delta) {
-      line += '（前回配信から ' + delta + '回）';
-    }
-    lines.push(line);
+    segments.push(
+      '再生' +
+        perfFormatInt_(snap.views30d) +
+        '回' +
+        (prev ? perfDeltaSuffix_(snap.views30d, prev.views30d) : '')
+    );
   }
-  const blogLine = perfBlogLine_(data.blogDailyRows, slot.dateKey);
-  if (blogLine) {
-    lines.push(blogLine);
+  const blogSegment = perfBlogSegment_(data.blogDailyRows, slot.dateKey);
+  if (blogSegment) {
+    segments.push(blogSegment);
+  }
+  if (typeof snap.balance === 'number') {
+    segments.push('X残高$' + snap.balance.toFixed(2));
   }
   const topPost = perfTopBlogPost_(data.blogPostRows);
   if (topPost) {
-    lines.push(
-      'よく読まれている記事: ' +
-        topPost.title +
-        '（28日で ' +
-        perfFormatInt_(topPost.views) +
-        '回）'
+    segments.push(
+      '人気記事: ' + topPost.title + ' ' + perfFormatInt_(topPost.views) + '回'
     );
-  }
-  if (typeof snap.balance === 'number') {
-    lines.push('X クレジット残高: $' + snap.balance.toFixed(2));
   }
   if (prevSlot) {
-    perfNewPostLines_(data.mediaRows, prevSlot.atMs, slot.atMs).forEach(
-      (line) => lines.push(line)
+    perfNewPostCaptions_(data.mediaRows, prevSlot.atMs, slot.atMs).forEach(
+      (caption) => segments.push('新規: ' + caption)
     );
   }
+  let summary = '';
+  segments.forEach((segment) => {
+    const next = summary ? summary + ' / ' + segment : segment;
+    if (next.length <= PERF_RSS_SUMMARY_CHARS) {
+      summary = next;
+    }
+  });
   const dateParts = slot.dateKey.split('-');
   return {
     title:
@@ -8134,17 +8155,12 @@ function buildPerfHighlightItem_(slot, prevSlot, data) {
       'のハイライト',
     guid: 'perf-' + slot.dateKey + '-' + slot.key,
     pubDate: new Date(slot.atMs).toUTCString(),
-    descriptionHtml:
-      lines.map((line) => escapeXmlText_(line)).join('<br/>') +
-      '<br/><a href="' +
-      PERF_RSS_CHANNEL.link +
-      '">SNS分析（/social）で詳しく見る</a>',
+    descriptionText: summary,
   };
 }
 
 // Builds the RSS 2.0 document from highlight items (newest
-// first). Item descriptions arrive as escaped-line HTML and
-// are inserted as-is; titles and guids are escaped here.
+// first). Titles, guids and descriptions are escaped here.
 function buildPerfRss_(items) {
   const lines = [
     '<?xml version="1.0" encoding="UTF-8"?>',
@@ -8164,7 +8180,7 @@ function buildPerfRss_(items) {
       '<link>' + escapeXmlText_(PERF_RSS_CHANNEL.link) + '</link>',
       '<guid isPermaLink="false">' + escapeXmlText_(item.guid) + '</guid>',
       '<pubDate>' + item.pubDate + '</pubDate>',
-      '<description>' + (item.descriptionHtml || '') + '</description>',
+      '<description>' + escapeXmlText_(item.descriptionText || '') + '</description>',
       '</item>'
     );
   });
@@ -8671,6 +8687,7 @@ if (typeof exports !== 'undefined') {
   exports.buildPerfHighlightItem_ = buildPerfHighlightItem_;
   exports.buildPerfRss_ = buildPerfRss_;
   exports.servePerfRss_ = servePerfRss_;
+  exports.PERF_RSS_SUMMARY_CHARS = PERF_RSS_SUMMARY_CHARS;
   exports.PERF_RSS_SLOTS = PERF_RSS_SLOTS;
   exports.PERF_RSS_ITEM_COUNT = PERF_RSS_ITEM_COUNT;
   exports.buildCommentsRss_ = buildCommentsRss_;
