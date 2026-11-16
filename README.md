@@ -40,6 +40,7 @@ Muse の API 接続の仕組みは OAuth の入口が単一ドメインのサー
 - `offset`（既定 0）：limit と組み合わせてページングする
 - `filter`：書式は検証するが、フィルタ付きレポートは提供しない（上記）
 - `action=music_count`：公開アクション。サイト共通ヘッダーに出す「川口の歌」の累計再生回数のため、認証なしで呼べる。返すのは music_play イベントの累計 eventCount（2026-11-08以降）と更新日時だけで、他のデータは一切返さない。CacheService で約1時間キャッシュし、GA4 Data API を叩く頻度を抑える
+- `action=comments_rss&source=instagram|threads&token=…`：/reader 向けに、履歴シートの `ig_comments` / `threads_replies` タブに貯めた「自分の投稿へのコメント・返信」を新しい順に最大50件、RSS 2.0 で返す。リクエスト時にプラットフォームの API は叩かない。コメント本文を含むため認証は必須で、スクリプトプロパティ `COMMENTS_RSS_TOKEN` と一致する `token` が無い・違う場合は何も返さない（プロパティ未設定の間は全リクエストを拒否するので、コードをデプロイしただけでは何も公開されない）。guid はプラットフォームのコメント／返信 ID そのもの、pubDate は RFC 822 形式
 
 ## SNSフォロワー数（action=sns_counts）
 
@@ -90,6 +91,9 @@ YouTube・Instagram・Threads のフォロワー数を GAS 自身が定期取得
 - `youtube_media` シート（キー `video_id` で upsert）：`youtube.recent_videos` の動画ごとに1行。列は collected_at、video_id、published_at、title、views、likes、comments。動画ごとの数値はもともと毎回の収集でアップロード一覧から取得していた分（最大10件）で、履歴のために追加の取得はしていない
 - `ig_demographics` シート（キー `breakdown_key` で upsert）：Instagram のフォロワー属性。列は breakdown_key、breakdown、key、value、collected_at。breakdown は age_gender（年代×性別、key は `25-34/F` の形）、city（上位の市）、country（上位の国）の3種で、キーで1行にまとめる。取得に失敗した breakdown は行を作らず、既存行も消さない
 - `threads_account` シート（キー `metric` で upsert）：Threads のアカウント指標（過去30日）。列は metric、value、collected_at。metric は views_30d、interactions_total / likes / replies / reposts / quotes。数値が取れた metric だけ行を作る
+- `ig_comments` シート（キー `comment_id` で upsert）：自分の Instagram 投稿へのコメントと返信。列は comment_id、media_id、parent_comment_id、username、text、posted_at、like_count、permalink、collected_at。毎時の収集で `media` の comments 件数が前回より増えた投稿だけコメント一覧（返信を展開）を取りに行く。初回の取得では、それ以前からあったコメントでフィードが埋まらないよう、前回の収集がその投稿を観測した時刻より後に付いたものだけを入れる（2回目以降は保存済みの最古のコメントが境界になる）
+- `threads_replies` シート（キー `reply_id` で upsert）：自分の Threads 投稿への返信。列は reply_id、post_id、username、text、posted_at、permalink、collected_at。`threads_media` の replies 件数が増えた投稿だけ conversation を取りに行く。自分の返信は除く。境界の扱いは `ig_comments` と同じ
+- コメント系の2タブは、posted_at が60日より古い行を収集のたびに間引く（/reader 側の保持期間と一致）。取得には追加の認可が要る：Instagram は Meta トークンに `instagram_manage_comments`、Threads は `threads_read_replies`（認可スコープに含めて認可をやり直す）
 - `x_media` シート（キー `post_id` で upsert）：`x.recent_posts` の投稿ごとに1行。列は collected_at、post_id、posted_at、text、views、likes、reposts、replies。URL は保存せず、読み取り時に post_id から組み立てる
 - `blog_daily` シート（キー `date` で upsert）：ブログの日次 KPI を GA4 から取得して書く（スナップショット経由ではない）。列は date、views、users、sessions、avg_speed_ms、music_plays、collected_at。対象は表示窓の全日（28daysAgo〜today の29日）で、毎回の収集で窓全体を取り直して上書きする（GA4 側の後日修正も次の収集で反映される。当日分は途中経過）。avg_speed_ms は `wv_lcp` イベントの平均値（eventValue / eventCount、ミリ秒）で、表示スピードの指標。music_plays はその日の `music_play` イベント件数
 - `blog_posts` シート（キー `path` で upsert）：ブログの記事ごとに1行。列は path、title、views_28d、collected_at。path は `/<id>` と `/blog/<id>` を一本化した正規形 `/blog/<id>`（フロントのランキングと同じ合算ルール、記事IDの判定は `action=top_articles` と同じ）。views_28d は直近28日の表示回数、title は GA4 の pageTitle
