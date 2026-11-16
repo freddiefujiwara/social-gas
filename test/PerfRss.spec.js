@@ -101,6 +101,9 @@ describe('Performance highlights RSS', () => {
       blogPostRows: [
         { path: '/blog/a', title: '記事A', views_28d: 100 },
         { path: '/blog/b', title: '記事B', views_28d: 250 },
+        // The generic SPA-shell title outranks both on views
+        // and must still be skipped.
+        { path: '/blog/c', title: '藤原史和｜川口を歩くQAエンジニア', views_28d: 458 },
       ],
       mediaRows: [
         {
