@@ -8012,13 +8012,19 @@ function perfBlogLine_(blogDailyRows, slotDateKey) {
   );
 }
 
+// blog_posts rows whose GA4 page title never got past the
+// SPA shell carry the site title instead of the article's;
+// they say nothing about which article was read, so the
+// most-read pick skips them.
+const PERF_BLOG_GENERIC_TITLE = '藤原史和｜川口を歩くQAエンジニア';
+
 // The most-read article of the stored 28-day window, or null.
 function perfTopBlogPost_(blogPostRows) {
   let best = null;
   (blogPostRows || []).forEach((row) => {
     const title = historyTextOrNull_(row && row.title);
     const views = snsNumberOrNull_(row && row.views_28d);
-    if (!title || typeof views !== 'number') {
+    if (!title || title === PERF_BLOG_GENERIC_TITLE || typeof views !== 'number') {
       return;
     }
     if (!best || views > best.views) {
