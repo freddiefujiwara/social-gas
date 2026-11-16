@@ -7979,10 +7979,10 @@ function perfDeltaText_(value, base) {
   return (delta > 0 ? '+' : '') + perfFormatInt_(delta);
 }
 
-// The blog segment of one item: the newest completed JST
-// day in blog_daily (today's row is still a running total,
-// so the segment always names a finished day).
-function perfBlogSegment_(blogDailyRows, slotDateKey) {
+// The newest completed JST day in blog_daily, as
+// { dateKey, views }: today's row is still a running total,
+// so the day an item names is always a finished one.
+function perfBlogDay_(blogDailyRows, slotDateKey) {
   let best = null;
   (blogDailyRows || []).forEach((row) => {
     const dateKey = snsHistoryKeyCell_(row && row.date);
@@ -7997,17 +7997,39 @@ function perfBlogSegment_(blogDailyRows, slotDateKey) {
       best = { dateKey, views };
     }
   });
-  if (!best) {
+  return best;
+}
+
+// The blog day as a compact segment: ブログ(11/16)48回.
+function perfBlogSegment_(blogDay) {
+  if (!blogDay) {
     return '';
   }
-  const parts = best.dateKey.split('-');
+  const parts = blogDay.dateKey.split('-');
   return (
     'ブログ(' +
     Number(parts[1]) +
     '/' +
     Number(parts[2]) +
     ')' +
-    perfFormatInt_(best.views) +
+    perfFormatInt_(blogDay.views) +
+    '回'
+  );
+}
+
+// The blog day as a full detail line.
+function perfBlogLine_(blogDay) {
+  if (!blogDay) {
+    return '';
+  }
+  const parts = blogDay.dateKey.split('-');
+  return (
+    'ブログ（' +
+    Number(parts[1]) +
+    '月' +
+    Number(parts[2]) +
+    '日）: 表示 ' +
+    perfFormatInt_(blogDay.views) +
     '回'
   );
 }
@@ -8076,9 +8098,11 @@ function perfDeltaSuffix_(value, base) {
 // snapshot predates it. prevSlot is the chronologically
 // previous slot (the next entry of perfRssSlots_): it anchors
 // the since-last-delivery view growth and the new-posts
-// window. The description is one compact plain-text line
-// (see PERF_RSS_SUMMARY_CHARS); the item link already points
-// at /social, so no link is repeated in the text.
+// window. The description is two-part plain text: the
+// compact summary first (what /reader's card shows), then a
+// separator line, then the full detail lines — the card's
+// expand view on the reader side reveals the whole text, so
+// nothing is lost by keeping the headline short.
 function buildPerfHighlightItem_(slot, prevSlot, data) {
   const snap = perfSnapshotAt_(data.accountRows, slot.atMs);
   if (!snap) {
@@ -8087,6 +8111,7 @@ function buildPerfHighlightItem_(slot, prevSlot, data) {
   const dayAgo = perfSnapshotAt_(data.accountRows, slot.atMs - SNS_DAY_MS);
   const prev = prevSlot ? perfSnapshotAt_(data.accountRows, prevSlot.atMs) : null;
   const segments = [];
+  const lines = [];
   if (typeof snap.total === 'number') {
     segments.push(
       '延べ' +
@@ -8094,22 +8119,34 @@ function buildPerfHighlightItem_(slot, prevSlot, data) {
         '人' +
         (dayAgo ? perfDeltaSuffix_(snap.total, dayAgo.total) : '')
     );
+    let line = 'SNS延べフォロワー数: ' + perfFormatInt_(snap.total) + '人';
+    const delta = dayAgo ? perfDeltaText_(snap.total, dayAgo.total) : '';
+    if (delta) {
+      line += '（前日比 ' + delta + '）';
+    }
+    lines.push(line);
   }
   const parts = [];
+  const fullParts = [];
   if (typeof snap.ig === 'number') {
     parts.push('IG' + perfFormatInt_(snap.ig));
+    fullParts.push('Instagram ' + perfFormatInt_(snap.ig) + '人');
   }
   if (typeof snap.threads === 'number') {
     parts.push('Th' + perfFormatInt_(snap.threads));
+    fullParts.push('Threads ' + perfFormatInt_(snap.threads) + '人');
   }
   if (typeof snap.youtube === 'number') {
     parts.push('YT' + perfFormatInt_(snap.youtube));
+    fullParts.push('YouTube ' + perfFormatInt_(snap.youtube) + '人');
   }
   if (typeof snap.x === 'number') {
     parts.push('X' + perfFormatInt_(snap.x));
+    fullParts.push('X ' + perfFormatInt_(snap.x) + '人');
   }
   if (parts.length) {
     segments.push(parts.join(' '));
+    lines.push('内訳: ' + fullParts.join(' / '));
   }
   if (typeof snap.views30d === 'number') {
     segments.push(
@@ -8118,23 +8155,43 @@ function buildPerfHighlightItem_(slot, prevSlot, data) {
         '回' +
         (prev ? perfDeltaSuffix_(snap.views30d, prev.views30d) : '')
     );
+    let line =
+      'Instagram 過去30日の再生回数: ' + perfFormatInt_(snap.views30d) + '回';
+    const delta = prev ? perfDeltaText_(snap.views30d, prev.views30d) : '';
+    if (delta) {
+      line += '（前回配信から ' + delta + '回）';
+    }
+    lines.push(line);
   }
-  const blogSegment = perfBlogSegment_(data.blogDailyRows, slot.dateKey);
+  const blogDay = perfBlogDay_(data.blogDailyRows, slot.dateKey);
+  const blogSegment = perfBlogSegment_(blogDay);
   if (blogSegment) {
     segments.push(blogSegment);
+    lines.push(perfBlogLine_(blogDay));
   }
   if (typeof snap.balance === 'number') {
     segments.push('X残高$' + snap.balance.toFixed(2));
+    lines.push('X クレジット残高: $' + snap.balance.toFixed(2));
   }
   const topPost = perfTopBlogPost_(data.blogPostRows);
   if (topPost) {
     segments.push(
       '人気記事: ' + topPost.title + ' ' + perfFormatInt_(topPost.views) + '回'
     );
+    lines.push(
+      'よく読まれている記事: ' +
+        topPost.title +
+        '（28日で ' +
+        perfFormatInt_(topPost.views) +
+        '回）'
+    );
   }
   if (prevSlot) {
     perfNewPostCaptions_(data.mediaRows, prevSlot.atMs, slot.atMs).forEach(
-      (caption) => segments.push('新規: ' + caption)
+      (caption) => {
+        segments.push('新規: ' + caption);
+        lines.push('新規投稿: ' + caption);
+      }
     );
   }
   let summary = '';
@@ -8155,7 +8212,12 @@ function buildPerfHighlightItem_(slot, prevSlot, data) {
       'のハイライト',
     guid: 'perf-' + slot.dateKey + '-' + slot.key,
     pubDate: new Date(slot.atMs).toUTCString(),
-    descriptionText: summary,
+    descriptionText:
+      summary +
+      '\n-------\n' +
+      lines.join('\n') +
+      '\n詳しくは ' +
+      PERF_RSS_CHANNEL.link,
   };
 }
 

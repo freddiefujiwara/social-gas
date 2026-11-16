@@ -117,33 +117,50 @@ describe('Performance highlights RSS', () => {
       ],
     };
 
-    it('builds the morning item as a compact summary within budget', () => {
+    it('builds the morning item: compact summary, separator, full detail', () => {
       const slots = Code.perfRssSlots_(Date.parse('2026-11-17T06:05:00+09:00'), 2);
       const item = Code.buildPerfHighlightItem_(slots[0], slots[1], data);
       expect(item.title).toBe('11月17日 朝のハイライト');
       expect(item.guid).toBe('perf-2026-11-17-morning');
       expect(item.pubDate).toBe('Mon, 16 Nov 2026 21:00:00 GMT');
-      expect(item.descriptionText).toBe(
+      const summary = item.descriptionText.split('\n')[0];
+      expect(summary).toBe(
         '延べ4,215人(+22) / IG2,105 Th256 YT12 X1,842 / 再生570,000回(+5,302) / ' +
           'ブログ(11/16)48回 / X残高$39.69 / 人気記事: 記事B 250回'
       );
-      expect(item.descriptionText.length).toBeLessThanOrEqual(
-        Code.PERF_RSS_SUMMARY_CHARS
+      expect(summary.length).toBeLessThanOrEqual(Code.PERF_RSS_SUMMARY_CHARS);
+      // The new-post segment is the lowest priority in the
+      // compact summary and drops off when the budget runs
+      // out — but the full detail below the separator always
+      // carries it.
+      expect(summary).not.toContain('新しいリール');
+      expect(item.descriptionText).toContain('\n-------\n');
+      expect(item.descriptionText).toContain(
+        'SNS延べフォロワー数: 4,215人（前日比 +22）'
       );
-      // The new-post segment is the lowest priority here and
-      // drops off when the budget runs out.
-      expect(item.descriptionText).not.toContain('新しいリール');
+      expect(item.descriptionText).toContain(
+        '内訳: Instagram 2,105人 / Threads 256人 / YouTube 12人 / X 1,842人'
+      );
+      expect(item.descriptionText).toContain(
+        'Instagram 過去30日の再生回数: 570,000回（前回配信から +5,302回）'
+      );
+      expect(item.descriptionText).toContain('ブログ（11月16日）: 表示 48回');
+      expect(item.descriptionText).toContain(
+        'よく読まれている記事: 記事B（28日で 250回）'
+      );
+      expect(item.descriptionText).toContain('X クレジット残高: $39.69');
+      expect(item.descriptionText).toContain('新規投稿: 新しいリール');
       expect(item.descriptionText).not.toContain('前の投稿');
     });
 
-    it('includes a new post when the budget has room', () => {
+    it('includes a new post in the compact summary when the budget has room', () => {
       const slots = Code.perfRssSlots_(Date.parse('2026-11-17T06:05:00+09:00'), 2);
       const item = Code.buildPerfHighlightItem_(
         slots[0],
         slots[1],
         Object.assign({}, data, { blogPostRows: [] })
       );
-      expect(item.descriptionText).toContain('新規: 新しいリール');
+      expect(item.descriptionText.split('\n')[0]).toContain('新規: 新しいリール');
     });
 
     it('returns null when no snapshot predates the slot', () => {
