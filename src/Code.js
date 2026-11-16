@@ -7885,6 +7885,350 @@ function serveCommentsRss_(parameter) {
   return xmlOut_(buildCommentsRss_(source, rows));
 }
 
+// --- Performance highlights RSS (action=perf_rss) ---
+// GET /exec?action=perf_rss&token=... returns the SNS / blog
+// performance highlights as RSS for /reader: one item per
+// delivery slot — morning 06:00, noon 12:30, evening 20:30
+// (Asia/Tokyo). The feed is computed on the fly from the
+// history tabs (account / blog_daily / blog_posts / media);
+// nothing is stored for it and no platform API is called.
+// Each item reads the newest account snapshot at or before
+// its slot, so an item's figures never change once its slot
+// has passed, and the guid (date + slot) is stable across
+// fetches — the same item can never reappear as new. The
+// token is the reader-facing RSS token shared with the
+// comments feed (COMMENTS_RSS_TOKEN): the items carry the
+// real figures, so the feed refuses every request while the
+// property is unset or the token mismatches.
+
+const PERF_RSS_SLOTS = [
+  { key: 'morning', label: '朝', time: '06:00:00' },
+  { key: 'noon', label: '昼', time: '12:30:00' },
+  { key: 'evening', label: '夜', time: '20:30:00' },
+];
+// Items per RSS response: five days of slots.
+const PERF_RSS_ITEM_COUNT = 15;
+const PERF_RSS_CHANNEL = {
+  title: 'SNSハイライト（@freddiefujiwara）',
+  link: 'https://freddiefujiwara.com/social/',
+  description:
+    'SNSとブログのパフォーマンスのハイライト（朝6:00・昼12:30・夜20:30）',
+};
+
+// The delivery slots at or before nowMs, newest first, as
+// { key, label, dateKey, atMs }. Stepping back whole JST days
+// is exact because JST never shifts (see jstDateKey_).
+function perfRssSlots_(nowMs, count) {
+  const slots = [];
+  const todayStartMs = Date.parse(jstDateKey_(nowMs) + 'T00:00:00+09:00');
+  for (let dayOffset = 0; slots.length < count && dayOffset < 40; dayOffset++) {
+    const dateKey = jstDateKey_(todayStartMs - dayOffset * SNS_DAY_MS);
+    PERF_RSS_SLOTS.slice()
+      .reverse()
+      .forEach((slot) => {
+        const atMs = Date.parse(dateKey + 'T' + slot.time + '+09:00');
+        if (atMs <= nowMs && slots.length < count) {
+          slots.push({ key: slot.key, label: slot.label, dateKey, atMs });
+        }
+      });
+  }
+  return slots;
+}
+
+// The account state at an instant: the newest stored row at or
+// before atMs, normalized to the figures a highlight carries.
+// Null when no collection predates the instant.
+function perfSnapshotAt_(accountRows, atMs) {
+  let best = null;
+  let bestAt = -Infinity;
+  (accountRows || []).forEach((row) => {
+    const iso = historyTimestampOrNull_(row && row.collected_at);
+    const at = iso ? Date.parse(iso) : NaN;
+    if (!Number.isFinite(at) || at > atMs || at <= bestAt) {
+      return;
+    }
+    bestAt = at;
+    best = row;
+  });
+  if (!best) {
+    return null;
+  }
+  return {
+    total: snsNumberOrNull_(best.total_followers),
+    ig: snsNumberOrNull_(best.ig_followers),
+    threads: snsNumberOrNull_(best.threads_followers),
+    youtube: snsNumberOrNull_(best.youtube_subscribers),
+    x: snsNumberOrNull_(best.x_followers),
+    views30d: snsNumberOrNull_(best.views_30d),
+    balance: snsNumberOrNull_(best.x_api_balance_usd),
+  };
+}
+
+// An integer with thousands separators, sign kept.
+function perfFormatInt_(value) {
+  return String(Math.round(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+// A delta against a base value, signed: "+12" / "-3" / "0".
+// Empty when either side is missing.
+function perfDeltaText_(value, base) {
+  if (typeof value !== 'number' || typeof base !== 'number') {
+    return '';
+  }
+  const delta = value - base;
+  return (delta > 0 ? '+' : '') + perfFormatInt_(delta);
+}
+
+// The blog line of one item: the newest completed JST day in
+// blog_daily (today's row is still a running total, so the
+// line always names a finished day).
+function perfBlogLine_(blogDailyRows, slotDateKey) {
+  let best = null;
+  (blogDailyRows || []).forEach((row) => {
+    const dateKey = snsHistoryKeyCell_(row && row.date);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey) || dateKey >= slotDateKey) {
+      return;
+    }
+    const views = snsNumberOrNull_(row.views);
+    if (typeof views !== 'number') {
+      return;
+    }
+    if (!best || dateKey > best.dateKey) {
+      best = { dateKey, views };
+    }
+  });
+  if (!best) {
+    return '';
+  }
+  const parts = best.dateKey.split('-');
+  return (
+    'ブログ（' +
+    Number(parts[1]) +
+    '月' +
+    Number(parts[2]) +
+    '日）: 表示 ' +
+    perfFormatInt_(best.views) +
+    '回'
+  );
+}
+
+// The most-read article of the stored 28-day window, or null.
+function perfTopBlogPost_(blogPostRows) {
+  let best = null;
+  (blogPostRows || []).forEach((row) => {
+    const title = historyTextOrNull_(row && row.title);
+    const views = snsNumberOrNull_(row && row.views_28d);
+    if (!title || typeof views !== 'number') {
+      return;
+    }
+    if (!best || views > best.views) {
+      best = { title, views };
+    }
+  });
+  return best;
+}
+
+// The Instagram posts published inside (fromMs, toMs], as
+// one-line captions, oldest first, at most three.
+function perfNewPostLines_(mediaRows, fromMs, toMs) {
+  const fresh = [];
+  (mediaRows || []).forEach((row) => {
+    const iso = historyTimestampOrNull_(row && row.posted_at);
+    const at = iso ? Date.parse(iso) : NaN;
+    if (!Number.isFinite(at) || at <= fromMs || at > toMs) {
+      return;
+    }
+    const caption = historyTextOrNull_(row.caption) || '';
+    const firstLine = caption.split(/\r?\n/)[0].trim();
+    fresh.push({ at, text: firstLine.slice(0, 40) || '（キャプションなし）' });
+  });
+  return fresh
+    .sort((a, b) => a.at - b.at)
+    .slice(0, 3)
+    .map((post) => '新規投稿: ' + post.text);
+}
+
+// One highlight item for a slot, or null when no account
+// snapshot predates it. prevSlot is the chronologically
+// previous slot (the next entry of perfRssSlots_): it anchors
+// the since-last-delivery view growth and the new-posts
+// window. The description is HTML built from escaped lines;
+// buildPerfRss_ inserts it unescaped by design.
+function buildPerfHighlightItem_(slot, prevSlot, data) {
+  const snap = perfSnapshotAt_(data.accountRows, slot.atMs);
+  if (!snap) {
+    return null;
+  }
+  const dayAgo = perfSnapshotAt_(data.accountRows, slot.atMs - SNS_DAY_MS);
+  const prev = prevSlot ? perfSnapshotAt_(data.accountRows, prevSlot.atMs) : null;
+  const lines = [];
+  if (typeof snap.total === 'number') {
+    let line = 'SNS延べフォロワー数: ' + perfFormatInt_(snap.total) + '人';
+    const delta = dayAgo ? perfDeltaText_(snap.total, dayAgo.total) : '';
+    if (delta) {
+      line += '（前日比 ' + delta + '）';
+    }
+    lines.push(line);
+  }
+  const parts = [];
+  if (typeof snap.ig === 'number') {
+    parts.push('Instagram ' + perfFormatInt_(snap.ig) + '人');
+  }
+  if (typeof snap.threads === 'number') {
+    parts.push('Threads ' + perfFormatInt_(snap.threads) + '人');
+  }
+  if (typeof snap.youtube === 'number') {
+    parts.push('YouTube ' + perfFormatInt_(snap.youtube) + '人');
+  }
+  if (typeof snap.x === 'number') {
+    parts.push('X ' + perfFormatInt_(snap.x) + '人');
+  }
+  if (parts.length) {
+    lines.push('内訳: ' + parts.join(' / '));
+  }
+  if (typeof snap.views30d === 'number') {
+    let line =
+      'Instagram 過去30日の再生回数: ' + perfFormatInt_(snap.views30d) + '回';
+    const delta = prev ? perfDeltaText_(snap.views30d, prev.views30d) : '';
+    if (delta) {
+      line += '（前回配信から ' + delta + '回）';
+    }
+    lines.push(line);
+  }
+  const blogLine = perfBlogLine_(data.blogDailyRows, slot.dateKey);
+  if (blogLine) {
+    lines.push(blogLine);
+  }
+  const topPost = perfTopBlogPost_(data.blogPostRows);
+  if (topPost) {
+    lines.push(
+      'よく読まれている記事: ' +
+        topPost.title +
+        '（28日で ' +
+        perfFormatInt_(topPost.views) +
+        '回）'
+    );
+  }
+  if (typeof snap.balance === 'number') {
+    lines.push('X クレジット残高: $' + snap.balance.toFixed(2));
+  }
+  if (prevSlot) {
+    perfNewPostLines_(data.mediaRows, prevSlot.atMs, slot.atMs).forEach(
+      (line) => lines.push(line)
+    );
+  }
+  const dateParts = slot.dateKey.split('-');
+  return {
+    title:
+      Number(dateParts[1]) +
+      '月' +
+      Number(dateParts[2]) +
+      '日 ' +
+      slot.label +
+      'のハイライト',
+    guid: 'perf-' + slot.dateKey + '-' + slot.key,
+    pubDate: new Date(slot.atMs).toUTCString(),
+    descriptionHtml:
+      lines.map((line) => escapeXmlText_(line)).join('<br/>') +
+      '<br/><a href="' +
+      PERF_RSS_CHANNEL.link +
+      '">SNS分析（/social）で詳しく見る</a>',
+  };
+}
+
+// Builds the RSS 2.0 document from highlight items (newest
+// first). Item descriptions arrive as escaped-line HTML and
+// are inserted as-is; titles and guids are escaped here.
+function buildPerfRss_(items) {
+  const lines = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<rss version="2.0">',
+    '<channel>',
+    '<title>' + escapeXmlText_(PERF_RSS_CHANNEL.title) + '</title>',
+    '<link>' + escapeXmlText_(PERF_RSS_CHANNEL.link) + '</link>',
+    '<description>' + escapeXmlText_(PERF_RSS_CHANNEL.description) + '</description>',
+  ];
+  (items || []).forEach((item) => {
+    if (!item || !item.guid || !item.pubDate) {
+      return;
+    }
+    lines.push(
+      '<item>',
+      '<title>' + escapeXmlText_(item.title || '') + '</title>',
+      '<link>' + escapeXmlText_(PERF_RSS_CHANNEL.link) + '</link>',
+      '<guid isPermaLink="false">' + escapeXmlText_(item.guid) + '</guid>',
+      '<pubDate>' + item.pubDate + '</pubDate>',
+      '<description>' + (item.descriptionHtml || '') + '</description>',
+      '</item>'
+    );
+  });
+  lines.push('</channel>', '</rss>');
+  return lines.join('\n');
+}
+
+// Serves action=perf_rss. The token check is the comments
+// feed's: an unset COMMENTS_RSS_TOKEN refuses every request.
+// With the history sheet unconfigured the feed is empty.
+function servePerfRss_(parameter) {
+  const expected = getScriptProperty_(COMMENTS_RSS_TOKEN_PROPERTY);
+  if (!expected || !parameter.token || parameter.token !== expected) {
+    return jsonOut_({ ok: false, status: 403, error: 'invalid token' });
+  }
+  let items = [];
+  try {
+    const spreadsheet = openHistorySpreadsheet_();
+    if (spreadsheet) {
+      const data = {
+        accountRows:
+          readHistoryTabObjects_(
+            spreadsheet,
+            'account',
+            SNS_HISTORY_ACCOUNT_COLUMNS
+          ) || [],
+        blogDailyRows:
+          readHistoryTabObjects_(
+            spreadsheet,
+            'blog_daily',
+            SNS_HISTORY_BLOG_DAILY_COLUMNS
+          ) || [],
+        blogPostRows:
+          readHistoryTabObjects_(
+            spreadsheet,
+            'blog_posts',
+            SNS_HISTORY_BLOG_POSTS_COLUMNS
+          ) || [],
+        mediaRows:
+          readHistoryTabObjects_(
+            spreadsheet,
+            'media',
+            SNS_HISTORY_MEDIA_COLUMNS
+          ) || [],
+      };
+      // One extra slot: the oldest item still needs its
+      // previous slot for the growth and new-posts windows.
+      const slots = perfRssSlots_(Date.now(), PERF_RSS_ITEM_COUNT + 1);
+      for (let i = 0; i < Math.min(PERF_RSS_ITEM_COUNT, slots.length); i++) {
+        const item = buildPerfHighlightItem_(slots[i], slots[i + 1] || null, data);
+        if (item) {
+          items.push(item);
+        }
+      }
+    }
+  } catch (err) {
+    return jsonOut_({
+      ok: false,
+      status: 502,
+      error:
+        'feed unavailable: ' +
+        summarizeSnsHistoryError_(
+          err,
+          getScriptProperty_(SNS_HISTORY_SHEET_ID_PROPERTY)
+        ),
+    });
+  }
+  return xmlOut_(buildPerfRss_(items));
+}
+
 // --- Smoke records inlet (doPost, action=record_smoke) ---
 // The morning smoke workflow on GitHub Actions measures the
 // static pages, the pinned blog articles and the GAS endpoints
@@ -8024,6 +8368,13 @@ function doGet(e) {
       // Handled before the GA4 property check like sns_counts —
       // it reads only the history sheet, never the GA4 API.
       return serveCommentsRss_(parameter);
+    }
+    if (parameter.action === 'perf_rss') {
+      // The performance highlights as RSS for /reader, gated
+      // by the same RSS token as the comments feed: the items
+      // carry the real figures, so nothing is served without
+      // it. Like comments_rss it reads only the history sheet.
+      return servePerfRss_(parameter);
     }
     const propertyId =
       PropertiesService.getScriptProperties().getProperty('GA4_PROPERTY_ID');
@@ -8309,6 +8660,13 @@ if (typeof exports !== 'undefined') {
   exports.parseThreadsConversation_ = parseThreadsConversation_;
   exports.fetchThreadsConversation_ = fetchThreadsConversation_;
   exports.pruneOldCommentRows_ = pruneOldCommentRows_;
+  exports.perfRssSlots_ = perfRssSlots_;
+  exports.perfSnapshotAt_ = perfSnapshotAt_;
+  exports.buildPerfHighlightItem_ = buildPerfHighlightItem_;
+  exports.buildPerfRss_ = buildPerfRss_;
+  exports.servePerfRss_ = servePerfRss_;
+  exports.PERF_RSS_SLOTS = PERF_RSS_SLOTS;
+  exports.PERF_RSS_ITEM_COUNT = PERF_RSS_ITEM_COUNT;
   exports.buildCommentsRss_ = buildCommentsRss_;
   exports.commentsRssRows_ = commentsRssRows_;
   exports.serveCommentsRss_ = serveCommentsRss_;
