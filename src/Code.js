@@ -6956,6 +6956,10 @@ function collectSnsCounts() {
     SNS_SNAPSHOT_PROPERTY,
     JSON.stringify(snapshot)
   );
+  // The comments collection diffs this run's counts against the
+  // counts the history tabs still store, so it runs before the
+  // history upsert below overwrites them with this run's values.
+  collectPostComments_(snapshot);
   appendSnsHistory_(snapshot);
   appendBlogHistory_();
   // The history writes above are the only moments the read
@@ -7101,6 +7105,686 @@ function htmlOut_(html) {
   );
 }
 
+// --- Post comments / replies (collection + RSS for /reader) ---
+// /reader wants the comments on the owner's Instagram posts and
+// the replies to the owner's Threads posts as RSS feeds, in the
+// same "everything becomes a feed" shape as the X notification
+// feeds. The official APIs expose no notification timeline, but
+// the comments / replies on one's own posts are readable, so the
+// hourly collection gathers those and this section serves them
+// back as RSS 2.0:
+//
+//   - collectPostComments_() rides collectSnsCounts(): it diffs
+//     the counts the snapshot just fetched (media.comments /
+//     posts.replies) against the counts the history tabs still
+//     store from the previous run, and only for the posts whose
+//     count grew does it fetch the detail (IG: the media's
+//     comments edge with replies expanded; Threads: the post's
+//     conversation edge). Rows land in the history spreadsheet's
+//     "ig_comments" / "threads_replies" tabs, upserted by the
+//     platform's immutable comment / reply id, and rows whose
+//     posted_at is over 60 days old are pruned on the same run —
+//     the window /reader itself keeps.
+//   - GET /exec?action=comments_rss&source=instagram|threads
+//     &token=... returns the newest 50 stored rows as RSS. The
+//     request never calls the platform APIs; it only reads the
+//     tabs. The token must match the Script Property
+//     COMMENTS_RSS_TOKEN (the shared-token pattern of the
+//     tweet-gas sync and groq-gas): while the property is unset
+//     the feed refuses every request, so deploying this code
+//     alone exposes nothing — the feed carries comment text and
+//     is never served unauthenticated.
+//
+// Scope prerequisites (both re-authorized by the owner; the code
+// degrades to per-source errors without them): IG needs
+// instagram_manage_comments on the Meta token, Threads needs
+// threads_read_replies (see the THREADS_OAUTH_SCOPES change).
+// A post's first-ever detail fetch keeps only the comments that
+// arrived after the previous collection observed the post, so
+// enabling the feature does not flood the feed with the comments
+// that were already there.
+
+const COMMENTS_RSS_TOKEN_PROPERTY = 'COMMENTS_RSS_TOKEN';
+const SNS_IG_COMMENTS_TAB = 'ig_comments';
+const SNS_THREADS_REPLIES_TAB = 'threads_replies';
+// Both tabs are keyed by their first column (the platform's
+// comment / reply id), unlike the media tabs whose key follows
+// collected_at: a comment row has no use for a leading timestamp.
+const SNS_HISTORY_IG_COMMENTS_COLUMNS = [
+  'comment_id',
+  'media_id',
+  'parent_comment_id',
+  'username',
+  'text',
+  'posted_at',
+  'like_count',
+  'permalink',
+  'collected_at',
+];
+const SNS_HISTORY_THREADS_REPLIES_COLUMNS = [
+  'reply_id',
+  'post_id',
+  'username',
+  'text',
+  'posted_at',
+  'permalink',
+  'collected_at',
+];
+// Stored comments older than this are pruned during collection;
+// it matches the retention /reader applies to its local store.
+const SNS_COMMENTS_RETENTION_DAYS = 60;
+// Items per RSS response (the newest ones win).
+const SNS_COMMENTS_RSS_LIMIT = 50;
+// Comments requested per detail fetch. The APIs return newest
+// first and a count diff is normally a handful of comments, so
+// one page is the whole story in practice.
+const SNS_COMMENTS_PAGE_LIMIT = 50;
+// Detail fetches per source per collection, as a runaway guard:
+// a burst beyond this is picked up by the following collections
+// (the stored counts keep lagging until the detail lands).
+const SNS_COMMENTS_DETAIL_FETCH_MAX = 5;
+// Characters of the comment text the RSS item title carries.
+const SNS_COMMENTS_RSS_TITLE_CHARS = 60;
+
+const COMMENTS_RSS_CHANNELS = {
+  instagram: {
+    tab: SNS_IG_COMMENTS_TAB,
+    columns: SNS_HISTORY_IG_COMMENTS_COLUMNS,
+    idColumn: 'comment_id',
+    title: 'Instagram コメント（@freddiefujiwara）',
+    link: 'https://www.instagram.com/freddiefujiwara/',
+    description: '自分の Instagram 投稿へのコメントと返信',
+  },
+  threads: {
+    tab: SNS_THREADS_REPLIES_TAB,
+    columns: SNS_HISTORY_THREADS_REPLIES_COLUMNS,
+    idColumn: 'reply_id',
+    title: 'Threads 返信（@freddiefujiwara）',
+    link: 'https://www.threads.net/@freddiefujiwara',
+    description: '自分の Threads 投稿への返信',
+  },
+};
+
+// The stored per-post counts of one history tab as
+// { id: { count, collected_at } }: the baseline the next
+// collection diffs against. Rows whose count cell does not read
+// as a number keep a null count and never trigger a fetch.
+function previousCountsById_(rows, idColumn, countColumn) {
+  const byId = {};
+  (rows || []).forEach((row) => {
+    const id = historyTextOrNull_(row && row[idColumn]);
+    if (!id) {
+      return;
+    }
+    byId[id] = {
+      count: snsNumberOrNull_(row[countColumn]),
+      collected_at: historyTextOrNull_(row.collected_at) || '',
+    };
+  });
+  return byId;
+}
+
+// Which posts to fetch detail for: the ones present in the
+// previous baseline whose count grew. A post with no baseline
+// row (first seen this run) is skipped — its current count
+// becomes the baseline when the history upsert lands, and only
+// growth after that fetches detail. Capped so one collection
+// never fans out beyond SNS_COMMENTS_DETAIL_FETCH_MAX fetches.
+function planCommentTargets_(freshCounts, previousById, maxTargets) {
+  const targets = [];
+  (freshCounts || []).forEach((entry) => {
+    if (!entry || !entry.id) {
+      return;
+    }
+    const prev = previousById ? previousById[entry.id] : null;
+    if (!prev) {
+      return;
+    }
+    if (typeof entry.count !== 'number' || typeof prev.count !== 'number') {
+      return;
+    }
+    if (entry.count > prev.count) {
+      targets.push({ id: entry.id, prevCollectedAt: prev.collected_at || '' });
+    }
+  });
+  return targets.slice(0, maxTargets);
+}
+
+// The stored comments of one post as { postId: boundary }: the
+// boundary is the oldest stored posted_at, the line the next
+// fetch filters against. A post absent from the map has no
+// stored comments yet.
+function oldestStoredCommentByPost_(rows, postColumn) {
+  const byPost = {};
+  (rows || []).forEach((row) => {
+    const postId = historyTextOrNull_(row && row[postColumn]);
+    if (!postId) {
+      return;
+    }
+    const iso = historyTimestampOrNull_(row.posted_at);
+    const at = iso ? Date.parse(iso) : NaN;
+    if (!Number.isFinite(at)) {
+      return;
+    }
+    if (!(postId in byPost) || at < byPost[postId].at) {
+      byPost[postId] = { at, iso };
+    }
+  });
+  const boundaries = {};
+  Object.keys(byPost).forEach((postId) => {
+    boundaries[postId] = byPost[postId].iso;
+  });
+  return boundaries;
+}
+
+// Keeps only the comments posted after a boundary instant. The
+// boundary is what stops the feed from filling with comments
+// that predate the feature: on a post's first-ever detail fetch
+// it is the moment the previous collection observed the post
+// (the stored media row's collected_at), and afterwards it is
+// the oldest stored comment's posted_at — a comment that
+// arrived since is always newer than both, while the rest of
+// the fetched page is either already stored (the id-keyed
+// upsert would dedupe it) or older than the feature. An
+// unreadable boundary keeps nothing: baselining silently is
+// safer than importing blindly.
+function filterCommentsAfter_(comments, boundaryIso) {
+  const since = Date.parse(boundaryIso || '');
+  if (!Number.isFinite(since)) {
+    return [];
+  }
+  return (comments || []).filter((comment) => {
+    const at = Date.parse((comment && comment.posted_at) || '');
+    return Number.isFinite(at) && at > since;
+  });
+}
+
+// One IG comments page (newest first) flattened to plain comment
+// objects: top-level comments with parent_id '' and their
+// replies with the parent's id. The media's comments insight
+// count includes the replies, so both halves belong to the feed.
+function parseInstagramComments_(data) {
+  const items = data && Array.isArray(data.data) ? data.data : [];
+  const comments = [];
+  const toComment = (item, parentId) => ({
+    id: String(item.id),
+    parent_id: parentId,
+    username: item.username != null ? String(item.username) : '',
+    text: item.text != null ? String(item.text) : '',
+    posted_at: item.timestamp || '',
+    like_count: snsNumberOrNull_(item.like_count),
+  });
+  items.forEach((item) => {
+    if (!item || item.id == null) {
+      return;
+    }
+    comments.push(toComment(item, ''));
+    const replies =
+      item.replies && Array.isArray(item.replies.data) ? item.replies.data : [];
+    replies.forEach((reply) => {
+      if (!reply || reply.id == null) {
+        return;
+      }
+      comments.push(toComment(reply, String(item.id)));
+    });
+  });
+  return comments;
+}
+
+// Fetches one media's comments page. Returns { comments, error }
+// in the fetchInsightsJson_ shape of habits: error is a short
+// secret-free summary (the media id plus the API summary).
+function fetchInstagramComments_(mediaId, token) {
+  const res = fetchInsightsJson_(
+    META_GRAPH_BASE +
+      mediaId +
+      '/comments?fields=id,text,username,timestamp,like_count,' +
+      'replies{id,text,username,timestamp,like_count}&limit=' +
+      SNS_COMMENTS_PAGE_LIMIT +
+      '&access_token=' +
+      encodeURIComponent(token)
+  );
+  if (res.error) {
+    return { comments: null, error: String(mediaId) + ': ' + res.error };
+  }
+  if (!res.data || !Array.isArray(res.data.data)) {
+    return {
+      comments: null,
+      error: String(mediaId) + ': response had no comments array',
+    };
+  }
+  return { comments: parseInstagramComments_(res.data), error: null };
+}
+
+// One Threads conversation page flattened to plain reply
+// objects. The conversation edge returns every depth of reply
+// (each still addressed to the root post this feed is about),
+// and it includes the owner's own replies: those are dropped
+// (is_reply_owned_by_me), as is the root post itself when the
+// edge echoes it back.
+function parseThreadsConversation_(data, postId) {
+  const items = data && Array.isArray(data.data) ? data.data : [];
+  const replies = [];
+  items.forEach((item) => {
+    if (!item || item.id == null) {
+      return;
+    }
+    if (String(item.id) === String(postId)) {
+      return;
+    }
+    if (item.is_reply_owned_by_me === true) {
+      return;
+    }
+    replies.push({
+      id: String(item.id),
+      username: item.username != null ? String(item.username) : '',
+      text: item.text != null ? String(item.text) : '',
+      posted_at: item.timestamp || '',
+      permalink: item.permalink || '',
+    });
+  });
+  return replies;
+}
+
+// Fetches one post's conversation page. Returns
+// { replies, error } like fetchInstagramComments_.
+function fetchThreadsConversation_(postId, token) {
+  const res = fetchInsightsJson_(
+    THREADS_GRAPH_BASE +
+      postId +
+      '/conversation?fields=id,text,username,permalink,timestamp,' +
+      'is_reply_owned_by_me&limit=' +
+      SNS_COMMENTS_PAGE_LIMIT +
+      '&access_token=' +
+      encodeURIComponent(token)
+  );
+  if (res.error) {
+    return { replies: null, error: String(postId) + ': ' + res.error };
+  }
+  if (!res.data || !Array.isArray(res.data.data)) {
+    return {
+      replies: null,
+      error: String(postId) + ': response had no conversation array',
+    };
+  }
+  return { replies: parseThreadsConversation_(res.data, postId), error: null };
+}
+
+// Drops the stored rows of one comments tab whose posted_at is
+// older than the retention window, rewriting the tab in place
+// (the same write pattern as upsertSnsHistorySheet_). Rows whose
+// posted_at does not parse are kept: an unreadable timestamp is
+// not proof of age. Returns the number of rows dropped.
+function pruneOldCommentRows_(spreadsheet, tabName, columns) {
+  const sheet = spreadsheet.getSheetByName(tabName);
+  if (!sheet) {
+    return 0;
+  }
+  const rows = readSnsHistoryRows_(sheet, columns);
+  if (!rows.length) {
+    return 0;
+  }
+  const postedIndex = columns.indexOf('posted_at');
+  const cutoff = Date.now() - SNS_COMMENTS_RETENTION_DAYS * SNS_DAY_MS;
+  const kept = rows.filter((row) => {
+    const iso = historyTimestampOrNull_(row[postedIndex]);
+    const at = iso ? Date.parse(iso) : NaN;
+    return !Number.isFinite(at) || at >= cutoff;
+  });
+  const dropped = rows.length - kept.length;
+  if (!dropped) {
+    return 0;
+  }
+  if (kept.length) {
+    sheet.getRange(2, 1, kept.length, columns.length).setValues(kept);
+  }
+  const surplus = sheet.getLastRow() - (kept.length + 1);
+  if (surplus > 0) {
+    sheet.deleteRows(kept.length + 2, surplus);
+  }
+  return dropped;
+}
+
+// The Instagram half of collectPostComments_: fetches the
+// comments of the media whose stored count grew and upserts
+// them into ig_comments. Returns { stored, error }; failures are
+// summarized, never thrown, and one media's failure does not
+// stop the others.
+function collectInstagramComments_(spreadsheet, snapshot, collectedAt) {
+  const result = { stored: 0, error: null };
+  const instagram = (snapshot && snapshot.instagram) || {};
+  const media = Array.isArray(instagram.recent_media)
+    ? instagram.recent_media
+    : null;
+  if (!media) {
+    return result;
+  }
+  const token = getScriptProperty_('META_ACCESS_TOKEN');
+  if (!token) {
+    return result;
+  }
+  const prevById = previousCountsById_(
+    readHistoryTabObjects_(spreadsheet, 'media', SNS_HISTORY_MEDIA_COLUMNS),
+    'media_id',
+    'comments'
+  );
+  const storedRows =
+    readHistoryTabObjects_(
+      spreadsheet,
+      SNS_IG_COMMENTS_TAB,
+      SNS_HISTORY_IG_COMMENTS_COLUMNS
+    ) || [];
+  const storedBoundaryByMedia = oldestStoredCommentByPost_(
+    storedRows,
+    'media_id'
+  );
+  const permalinkById = {};
+  const freshCounts = media
+    .filter((entry) => entry && entry.id != null)
+    .map((entry) => {
+      permalinkById[String(entry.id)] = entry.permalink || '';
+      return {
+        id: String(entry.id),
+        count: snsNumberOrNull_(entry.comments),
+      };
+    });
+  const targets = planCommentTargets_(
+    freshCounts,
+    prevById,
+    SNS_COMMENTS_DETAIL_FETCH_MAX
+  );
+  const failures = [];
+  const newRows = [];
+  targets.forEach((target) => {
+    const fetched = fetchInstagramComments_(target.id, token);
+    if (fetched.error) {
+      failures.push(fetched.error);
+      return;
+    }
+    const boundary =
+      target.id in storedBoundaryByMedia
+        ? storedBoundaryByMedia[target.id]
+        : target.prevCollectedAt;
+    const feedable = filterCommentsAfter_(fetched.comments, boundary);
+    feedable.forEach((comment) => {
+      newRows.push([
+        snsHistoryTextCell_(comment.id),
+        snsHistoryTextCell_(target.id),
+        snsHistoryTextCell_(comment.parent_id),
+        snsHistoryTextCell_(comment.username),
+        snsHistoryTextCell_(comment.text.slice(0, SNS_CAPTION_MAX_LENGTH)),
+        snsHistoryTextCell_(comment.posted_at),
+        snsHistoryNumCell_(comment.like_count),
+        snsHistoryTextCell_(permalinkById[target.id]),
+        snsHistoryTextCell_(collectedAt),
+      ]);
+    });
+  });
+  if (newRows.length) {
+    upsertSnsHistorySheet_(
+      spreadsheet,
+      SNS_IG_COMMENTS_TAB,
+      SNS_HISTORY_IG_COMMENTS_COLUMNS,
+      0,
+      newRows
+    );
+    result.stored = newRows.length;
+  }
+  pruneOldCommentRows_(
+    spreadsheet,
+    SNS_IG_COMMENTS_TAB,
+    SNS_HISTORY_IG_COMMENTS_COLUMNS
+  );
+  result.error = failures.length
+    ? failures.length + ' media comment fetches failed (' + failures[0] + ')'
+    : null;
+  return result;
+}
+
+// The Threads half of collectPostComments_: fetches the
+// conversations of the posts whose stored reply count grew and
+// upserts them into threads_replies. Returns { stored, error }
+// like collectInstagramComments_.
+function collectThreadsReplies_(spreadsheet, snapshot, collectedAt) {
+  const result = { stored: 0, error: null };
+  const threads = (snapshot && snapshot.threads) || {};
+  const posts = Array.isArray(threads.recent_posts)
+    ? threads.recent_posts
+    : null;
+  if (!posts) {
+    return result;
+  }
+  const token = threadsToken_();
+  if (!token) {
+    return result;
+  }
+  const prevById = previousCountsById_(
+    readHistoryTabObjects_(
+      spreadsheet,
+      'threads_media',
+      SNS_HISTORY_THREADS_MEDIA_COLUMNS
+    ),
+    'post_id',
+    'replies'
+  );
+  const storedRows =
+    readHistoryTabObjects_(
+      spreadsheet,
+      SNS_THREADS_REPLIES_TAB,
+      SNS_HISTORY_THREADS_REPLIES_COLUMNS
+    ) || [];
+  const storedBoundaryByPost = oldestStoredCommentByPost_(storedRows, 'post_id');
+  const freshCounts = posts
+    .filter((entry) => entry && entry.id != null)
+    .map((entry) => ({
+      id: String(entry.id),
+      count: snsNumberOrNull_(entry.replies),
+    }));
+  const targets = planCommentTargets_(
+    freshCounts,
+    prevById,
+    SNS_COMMENTS_DETAIL_FETCH_MAX
+  );
+  const failures = [];
+  const newRows = [];
+  targets.forEach((target) => {
+    const fetched = fetchThreadsConversation_(target.id, token);
+    if (fetched.error) {
+      failures.push(fetched.error);
+      return;
+    }
+    const boundary =
+      target.id in storedBoundaryByPost
+        ? storedBoundaryByPost[target.id]
+        : target.prevCollectedAt;
+    const feedable = filterCommentsAfter_(fetched.replies, boundary);
+    feedable.forEach((reply) => {
+      newRows.push([
+        snsHistoryTextCell_(reply.id),
+        snsHistoryTextCell_(target.id),
+        snsHistoryTextCell_(reply.username),
+        snsHistoryTextCell_(reply.text.slice(0, SNS_CAPTION_MAX_LENGTH)),
+        snsHistoryTextCell_(reply.posted_at),
+        snsHistoryTextCell_(reply.permalink),
+        snsHistoryTextCell_(collectedAt),
+      ]);
+    });
+  });
+  if (newRows.length) {
+    upsertSnsHistorySheet_(
+      spreadsheet,
+      SNS_THREADS_REPLIES_TAB,
+      SNS_HISTORY_THREADS_REPLIES_COLUMNS,
+      0,
+      newRows
+    );
+    result.stored = newRows.length;
+  }
+  pruneOldCommentRows_(
+    spreadsheet,
+    SNS_THREADS_REPLIES_TAB,
+    SNS_HISTORY_THREADS_REPLIES_COLUMNS
+  );
+  result.error = failures.length
+    ? failures.length +
+      ' post conversation fetches failed (' +
+      failures[0] +
+      ')'
+    : null;
+  return result;
+}
+
+// The collection entry point collectSnsCounts() calls (before
+// appendSnsHistory_, whose upsert would erase the baseline).
+// No-op while the history sheet is unconfigured, and never
+// throws: each half logs its own summary line and the counts
+// collection that hosts it still counts as a success.
+function collectPostComments_(snapshot) {
+  const sheetId = getScriptProperty_(SNS_HISTORY_SHEET_ID_PROPERTY);
+  if (!sheetId) {
+    return;
+  }
+  try {
+    const spreadsheet = SpreadsheetApp.openById(sheetId);
+    const collectedAt =
+      (snapshot && snapshot.collected_at) || new Date().toISOString();
+    const ig = collectInstagramComments_(spreadsheet, snapshot, collectedAt);
+    if (ig.error) {
+      console.log('Instagram comments error: ' + ig.error);
+    }
+    const th = collectThreadsReplies_(spreadsheet, snapshot, collectedAt);
+    if (th.error) {
+      console.log('Threads replies error: ' + th.error);
+    }
+  } catch (err) {
+    console.log(
+      'Post comments collection failed: ' +
+        summarizeSnsHistoryError_(err, sheetId)
+    );
+  }
+}
+
+function escapeXmlText_(value) {
+  return String(value === null || value === undefined ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function xmlOut_(xml) {
+  return ContentService.createTextOutput(xml).setMimeType(
+    ContentService.MimeType.XML
+  );
+}
+
+// Builds the RSS 2.0 document for one source from normalized
+// rows ({ id, username, text, posted_at, permalink }): newest
+// first, at most SNS_COMMENTS_RSS_LIMIT items. The guid is the
+// platform's comment / reply id itself — immutable, so a stored
+// comment can never reappear as a new article the way a
+// regenerated id made the X notification feed repeat items.
+// pubDate is Date#toUTCString(), strict RFC 822. Rows whose
+// posted_at does not parse are skipped: an item without a valid
+// pubDate would poison the whole feed for strict readers.
+function buildCommentsRss_(source, rows) {
+  const channel = COMMENTS_RSS_CHANNELS[source];
+  const items = (rows || [])
+    .slice()
+    .sort((a, b) => compareTimestampDesc_(a.posted_at, b.posted_at))
+    .slice(0, SNS_COMMENTS_RSS_LIMIT);
+  const lines = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<rss version="2.0">',
+    '<channel>',
+    '<title>' + escapeXmlText_(channel.title) + '</title>',
+    '<link>' + escapeXmlText_(channel.link) + '</link>',
+    '<description>' + escapeXmlText_(channel.description) + '</description>',
+  ];
+  items.forEach((row) => {
+    const when = new Date(row.posted_at || '');
+    if (Number.isNaN(when.getTime()) || !row.id) {
+      return;
+    }
+    const text = row.text || '';
+    const title =
+      '@' +
+      (row.username || '') +
+      ': ' +
+      text.slice(0, SNS_COMMENTS_RSS_TITLE_CHARS);
+    lines.push(
+      '<item>',
+      '<title>' + escapeXmlText_(title) + '</title>',
+      '<link>' + escapeXmlText_(row.permalink || channel.link) + '</link>',
+      '<guid isPermaLink="false">' + escapeXmlText_(row.id) + '</guid>',
+      '<pubDate>' + when.toUTCString() + '</pubDate>',
+      '<description>' + escapeXmlText_(text) + '</description>',
+      '</item>'
+    );
+  });
+  lines.push('</channel>', '</rss>');
+  return lines.join('\n');
+}
+
+// The stored rows of one source's tab, normalized to the shape
+// buildCommentsRss_ consumes. A missing tab reads as no rows.
+function commentsRssRows_(spreadsheet, source) {
+  const channel = COMMENTS_RSS_CHANNELS[source];
+  const rows = readHistoryTabObjects_(
+    spreadsheet,
+    channel.tab,
+    channel.columns
+  );
+  if (!rows) {
+    return [];
+  }
+  return rows
+    .map((row) => ({
+      id: historyTextOrNull_(row[channel.idColumn]) || '',
+      username: historyTextOrNull_(row.username) || '',
+      text: historyTextOrNull_(row.text) || '',
+      posted_at: historyTimestampOrNull_(row.posted_at) || '',
+      permalink: historyTextOrNull_(row.permalink) || '',
+    }))
+    .filter((row) => row.id);
+}
+
+// Serves action=comments_rss. The token check comes first and
+// fails closed: an unset COMMENTS_RSS_TOKEN refuses every
+// request, and a mismatch answers a JSON 403-shaped refusal —
+// never the feed. An unknown source is a 400-shaped refusal.
+// With the history sheet unconfigured the feed is simply empty.
+function serveCommentsRss_(parameter) {
+  const expected = getScriptProperty_(COMMENTS_RSS_TOKEN_PROPERTY);
+  if (!expected || !parameter.token || parameter.token !== expected) {
+    return jsonOut_({ ok: false, status: 403, error: 'invalid token' });
+  }
+  const source = parameter.source || '';
+  if (!COMMENTS_RSS_CHANNELS[source]) {
+    return jsonOut_({ ok: false, status: 400, error: 'unknown source' });
+  }
+  let rows = [];
+  try {
+    const spreadsheet = openHistorySpreadsheet_();
+    if (spreadsheet) {
+      rows = commentsRssRows_(spreadsheet, source);
+    }
+  } catch (err) {
+    return jsonOut_({
+      ok: false,
+      status: 502,
+      error:
+        'feed unavailable: ' +
+        summarizeSnsHistoryError_(
+          err,
+          getScriptProperty_(SNS_HISTORY_SHEET_ID_PROPERTY)
+        ),
+    });
+  }
+  return xmlOut_(buildCommentsRss_(source, rows));
+}
+
 // --- Smoke records inlet (doPost, action=record_smoke) ---
 // The morning smoke workflow on GitHub Actions measures the
 // static pages, the pinned blog articles and the GAS endpoints
@@ -7232,6 +7916,14 @@ function doGet(e) {
       // Public by design: returns only the stored SNS follower snapshot.
       // Handled before the GA4 property check and before authentication.
       return jsonOut_(buildSnsCountsResponse_());
+    }
+    if (parameter.action === 'comments_rss') {
+      // The stored post comments / replies as RSS for /reader,
+      // gated by its own token (COMMENTS_RSS_TOKEN): the feed
+      // carries comment text, so nothing is served without it.
+      // Handled before the GA4 property check like sns_counts —
+      // it reads only the history sheet, never the GA4 API.
+      return serveCommentsRss_(parameter);
     }
     const propertyId =
       PropertiesService.getScriptProperties().getProperty('GA4_PROPERTY_ID');
@@ -7505,6 +8197,29 @@ if (typeof exports !== 'undefined') {
   exports.recordSmoke_ = recordSmoke_;
   exports.appendSmokeRows_ = appendSmokeRows_;
   exports.SMOKE_RECORDS_COLUMNS = SMOKE_RECORDS_COLUMNS;
+  exports.collectPostComments_ = collectPostComments_;
+  exports.collectInstagramComments_ = collectInstagramComments_;
+  exports.collectThreadsReplies_ = collectThreadsReplies_;
+  exports.previousCountsById_ = previousCountsById_;
+  exports.planCommentTargets_ = planCommentTargets_;
+  exports.filterCommentsAfter_ = filterCommentsAfter_;
+  exports.oldestStoredCommentByPost_ = oldestStoredCommentByPost_;
+  exports.parseInstagramComments_ = parseInstagramComments_;
+  exports.fetchInstagramComments_ = fetchInstagramComments_;
+  exports.parseThreadsConversation_ = parseThreadsConversation_;
+  exports.fetchThreadsConversation_ = fetchThreadsConversation_;
+  exports.pruneOldCommentRows_ = pruneOldCommentRows_;
+  exports.buildCommentsRss_ = buildCommentsRss_;
+  exports.commentsRssRows_ = commentsRssRows_;
+  exports.serveCommentsRss_ = serveCommentsRss_;
+  exports.escapeXmlText_ = escapeXmlText_;
+  exports.xmlOut_ = xmlOut_;
+  exports.COMMENTS_RSS_TOKEN_PROPERTY = COMMENTS_RSS_TOKEN_PROPERTY;
+  exports.SNS_HISTORY_IG_COMMENTS_COLUMNS = SNS_HISTORY_IG_COMMENTS_COLUMNS;
+  exports.SNS_HISTORY_THREADS_REPLIES_COLUMNS =
+    SNS_HISTORY_THREADS_REPLIES_COLUMNS;
+  exports.SNS_COMMENTS_RETENTION_DAYS = SNS_COMMENTS_RETENTION_DAYS;
+  exports.SNS_COMMENTS_RSS_LIMIT = SNS_COMMENTS_RSS_LIMIT;
   exports.openHistorySpreadsheet_ = openHistorySpreadsheet_;
   exports.readHistoryTabObjects_ = readHistoryTabObjects_;
   exports.readHistoryTabLastRowObject_ = readHistoryTabLastRowObject_;
