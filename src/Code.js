@@ -1500,9 +1500,10 @@ function refreshThreadsTokenIfNeeded_() {
 // The dedicated Threads app cannot be added to the existing Meta app
 // from the developer console, so its long-lived token is obtained
 // here instead: the owner runs threadsAuthorizeUrl() in the editor,
-// opens the logged URL and approves the threads_basic and
-// threads_manage_insights scopes. threads_basic covers the profile
-// reads, and threads_manage_insights is required because the
+// opens the logged URL and approves the threads_basic,
+// threads_manage_insights and threads_read_replies scopes.
+// threads_basic covers the profile reads, and
+// threads_manage_insights is required because the
 // follower count comes from the threads_insights edge (the profile
 // node has no followers_count field, and insights refuses a
 // threads_basic-only token with a permission error). Threads
@@ -1519,10 +1520,13 @@ const THREADS_OAUTH_STATE_PROPERTY = 'THREADS_OAUTH_STATE';
 const THREADS_AUTHORIZE_URL = 'https://threads.net/oauth/authorize';
 // Scopes requested at authorization time, comma-separated as the
 // Threads OAuth endpoint expects. threads_manage_insights is needed
-// for the threads_insights follower count; a refreshed token keeps
-// the scopes of the original authorization, so widening the scope
-// requires one fresh authorization run.
-const THREADS_OAUTH_SCOPES = 'threads_basic,threads_manage_insights';
+// for the threads_insights follower count, and threads_read_replies
+// for the conversation edge the comments collection reads replies
+// from; a refreshed token keeps the scopes of the original
+// authorization, so widening the scope requires one fresh
+// authorization run.
+const THREADS_OAUTH_SCOPES =
+  'threads_basic,threads_manage_insights,threads_read_replies';
 const THREADS_TOKEN_EXCHANGE_URL = 'https://graph.threads.net/oauth/access_token';
 const THREADS_LONG_LIVED_URL = 'https://graph.threads.net/access_token';
 const THREADS_REFRESH_URL = 'https://graph.threads.net/refresh_access_token';
