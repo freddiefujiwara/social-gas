@@ -1211,8 +1211,26 @@ function parseThreadsInsightsByName_(data) {
 // posts_error (the two halves travel in one call here, unlike
 // the per-edge fetches of the other networks), without touching
 // the rest of the collection.
+//
+// The profile half (followers and recent posts) prefers the
+// stats file x-cli writes hourly on the home server (the
+// X_STATS_URL property points at it): the file carries the
+// same shape as the snapshot's x section, so the collection
+// stops depending on tweet-gas's per-hour profile / post reads
+// against the official API — the main credit consumer. The
+// usage half has no file equivalent (it is billing data) and
+// always comes from tweet-gas. A file that cannot be fetched,
+// is not ok, or is older than SNS_X_STATS_MAX_AGE_MS simply
+// falls back to the tweet-gas values, so the file is an
+// optimisation, never a new single point of failure.
 
 const SNS_X_RECENT_POSTS_LIMIT = 50;
+
+// How old the X stats file may be before it counts as stale.
+// The file is regenerated hourly during the day (05:03–21:03
+// JST) and pauses overnight, so the worst healthy gap is about
+// 8 hours; a full day of slack still catches a dead generator.
+const SNS_X_STATS_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 // How many days of X API post consumption the sync carries
 // (tweet-gas sends the last 90 days).
@@ -1333,7 +1351,7 @@ function buildXPostEntry_(post) {
 // The whole X section from one POST to tweet-gas. Never throws:
 // every failure mode (unconfigured, HTTP error, malformed or
 // not-ok body) lands in the error fields with the values null.
-function fetchXDetail_() {
+function fetchXDetailFromTweetGas_() {
   const result = {
     followers: null,
     username: null,
@@ -1401,6 +1419,88 @@ function fetchXDetail_() {
       .map(buildXPostEntry_)
       .filter((entry) => entry.id)
       .slice(0, SNS_X_RECENT_POSTS_LIMIT);
+  }
+  return result;
+}
+
+// The profile half of the X section from the stats file x-cli
+// writes on the home server: { ok, collected_at, x: { username,
+// followers, following, recent_posts } }, the same shape as the
+// tweet-gas snapshot's x section (metrics missing on a post are
+// null, never 0). Never throws and never guesses: an unset
+// X_STATS_URL, a failed fetch, a not-ok body, or a collected_at
+// older than SNS_X_STATS_MAX_AGE_MS all return null, and the
+// caller falls back to the tweet-gas values. The returned posts
+// pass through the same normalization as the wire posts.
+function fetchXStatsFile_() {
+  const url = getScriptProperty_('X_STATS_URL');
+  if (!url) {
+    return null;
+  }
+  let res;
+  try {
+    res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  } catch (err) {
+    return null;
+  }
+  if (res.getResponseCode() !== 200) {
+    return null;
+  }
+  let data = null;
+  try {
+    data = JSON.parse(res.getContentText());
+  } catch (err) {
+    data = null;
+  }
+  if (!data || data.ok !== true || !data.x || typeof data.x !== 'object') {
+    return null;
+  }
+  const collectedMs = Date.parse(data.collected_at);
+  if (
+    !Number.isFinite(collectedMs) ||
+    Date.now() - collectedMs > SNS_X_STATS_MAX_AGE_MS
+  ) {
+    return null;
+  }
+  const x = data.x;
+  const result = {
+    followers: xWireNumberOrNull_(x.followers),
+    username: x.username != null ? String(x.username) : null,
+    recent_posts: null,
+  };
+  if (Array.isArray(x.recent_posts)) {
+    result.recent_posts = x.recent_posts
+      .map(buildXPostEntry_)
+      .filter((entry) => entry.id)
+      .slice(0, SNS_X_RECENT_POSTS_LIMIT);
+  }
+  return result;
+}
+
+// The X section for one collection: the usage half always comes
+// from tweet-gas, and the profile half (followers, username,
+// recent posts) is overlaid from the stats file whenever the
+// file yields it — see the section header for why. A half the
+// file provides also clears that half's tweet-gas error: the
+// numbers are there, so there is nothing left to report.
+function fetchXDetail_() {
+  const result = fetchXDetailFromTweetGas_();
+  const stats = fetchXStatsFile_();
+  if (!stats) {
+    return result;
+  }
+  if (stats.followers != null) {
+    result.followers = stats.followers;
+  }
+  if (stats.username) {
+    result.username = stats.username;
+  }
+  if (stats.recent_posts) {
+    result.recent_posts = stats.recent_posts;
+    result.posts_error = null;
+  }
+  if (stats.followers != null && stats.recent_posts) {
+    result.x_error = null;
   }
   return result;
 }

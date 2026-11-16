@@ -313,6 +313,117 @@ describe('X via tweet-gas (GAS-to-GAS sync)', () => {
     });
   });
 
+  describe('fetchXDetail_ with the stats file', () => {
+    const STATS_URL = 'https://example.com/x.freddie.stats.json';
+
+    const freshStats = (overrides) =>
+      Object.assign(
+        {
+          ok: true,
+          collected_at: new Date().toISOString(),
+          x: {
+            username: 'freddiefujiwara',
+            followers: 1840,
+            following: 836,
+            recent_posts: [
+              {
+                id: '3001',
+                posted_at: '2026-11-16T01:00:00.000Z',
+                text: 'ファイルからの投稿',
+                views: 111,
+                likes: 1,
+                reposts: 0,
+                replies: 0,
+              },
+            ],
+          },
+        },
+        overrides || {}
+      );
+
+    const tweetGasBody = {
+      ok: true,
+      action: 'sns_snapshot',
+      collected_at: '2026-11-16T00:00:00.000Z',
+      x: {
+        followers: 321,
+        username: 'freddiefujiwara',
+        recent_posts: WIRE_POSTS,
+      },
+      x_usage: { credit_balance_usd: 12.5, daily_posts: [] },
+      x_error: null,
+      posts_error: null,
+    };
+
+    const routeFetches = (statsHandler) => {
+      fetchHandler = (url) => {
+        if (url === STATS_URL) {
+          return statsHandler();
+        }
+        return res(200, tweetGasBody);
+      };
+    };
+
+    it('prefers the file for followers and posts, keeps usage from tweet-gas', () => {
+      configureSync();
+      store.X_STATS_URL = STATS_URL;
+      routeFetches(() => res(200, freshStats()));
+      const detail = Code.fetchXDetail_();
+      expect(detail.followers).toBe(1840);
+      expect(detail.recent_posts).toHaveLength(1);
+      expect(detail.recent_posts[0].id).toBe('3001');
+      expect(detail.recent_posts[0].url).toBe(
+        'https://x.com/i/web/status/3001'
+      );
+      expect(detail.api_balance_usd).toBe(12.5);
+    });
+
+    it('falls back to tweet-gas when the file fetch fails', () => {
+      configureSync();
+      store.X_STATS_URL = STATS_URL;
+      routeFetches(() => res(500, 'server error'));
+      const detail = Code.fetchXDetail_();
+      expect(detail.followers).toBe(321);
+      expect(detail.recent_posts).toHaveLength(2);
+    });
+
+    it('falls back to tweet-gas when the file is stale', () => {
+      configureSync();
+      store.X_STATS_URL = STATS_URL;
+      const stale = freshStats({
+        collected_at: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+      });
+      routeFetches(() => res(200, stale));
+      const detail = Code.fetchXDetail_();
+      expect(detail.followers).toBe(321);
+      expect(detail.recent_posts).toHaveLength(2);
+    });
+
+    it('uses the file even while tweet-gas is unconfigured', () => {
+      store.X_STATS_URL = STATS_URL;
+      fetchHandler = (url) => {
+        if (url === STATS_URL) {
+          return res(200, freshStats());
+        }
+        throw new Error('unexpected fetch: ' + url);
+      };
+      const detail = Code.fetchXDetail_();
+      expect(detail.followers).toBe(1840);
+      expect(detail.recent_posts).toHaveLength(1);
+      expect(detail.api_balance_usd).toBeNull();
+      expect(detail.x_error).toBeNull();
+      expect(detail.posts_error).toBeNull();
+    });
+
+    it('does not fetch the file while X_STATS_URL is unset', () => {
+      configureSync();
+      fetchHandler = () => res(200, tweetGasBody);
+      const detail = Code.fetchXDetail_();
+      expect(detail.followers).toBe(321);
+      expect(global.UrlFetchApp.fetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('extractXUsage_', () => {
     it('reads the balance and daily posts from x_usage', () => {
       const usage = Code.extractXUsage_({
