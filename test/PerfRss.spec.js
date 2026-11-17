@@ -60,6 +60,15 @@ describe('Performance highlights RSS', () => {
       views_30d: 570000,
       x_api_balance_usd: 39.69,
     }),
+    accountRow('2026-11-17T02:20:00.000Z', {
+      total_followers: 4222,
+      ig_followers: 2107,
+      threads_followers: 256,
+      youtube_subscribers: 12,
+      x_followers: 1847,
+      views_30d: 572709,
+      x_api_balance_usd: 39.41,
+    }),
   ];
 
   describe('perfRssSlots_', () => {
@@ -166,6 +175,21 @@ describe('Performance highlights RSS', () => {
       xMediaRows: [
         { posted_at: '2026-11-16T01:00:00.000Z', text: '昨日のポスト', views: 450 },
       ],
+      blogPostsDailyRows: [
+        { date: '2026-11-16', path: '/blog/b', title: '記事B', views: 120 },
+        { date: '2026-11-16', path: '/blog/a', title: '記事A', views: 30 },
+        { date: '2026-11-16', path: '/blog/c2', title: '記事C', views: 25 },
+        { date: '2026-11-16', path: '/blog/d', title: '記事D', views: 10 },
+        { date: '2026-11-16', path: '/blog/e', title: '記事E', views: 8 },
+        { date: '2026-11-16', path: '/blog/f', title: '記事F', views: 5 },
+        {
+          date: '2026-11-16',
+          path: '/blog/g',
+          title: '藤原史和｜川口を歩くQAエンジニア',
+          views: 200,
+        },
+        { date: '2026-11-15', path: '/blog/z', title: '一昨日の記事Z', views: 999 },
+      ],
     };
 
     it('builds the morning item: compact summary, separator, full detail', () => {
@@ -229,6 +253,43 @@ describe('Performance highlights RSS', () => {
       expect(item.descriptionText).toContain('クレジット消費: $1.01（残高 $39.89）');
       expect(item.descriptionText).toContain('【ブログ 昨日（11月16日）】');
       expect(item.descriptionText).toContain('表示 48回（前日比 +18）');
+      expect(item.descriptionText).toContain('昨日の記事トップ5');
+      expect(item.descriptionText).toContain('1. 記事B（120回）');
+      expect(item.descriptionText).toContain('2. 記事A（30回）');
+      expect(item.descriptionText).toContain('3. 記事C（25回）');
+      expect(item.descriptionText).toContain('4. 記事D（10回）');
+      expect(item.descriptionText).toContain('5. 記事E（8回）');
+      expect(item.descriptionText).not.toContain('記事F');
+      expect(item.descriptionText).not.toContain('一昨日の記事Z');
+    });
+
+    it('builds the noon item as a diff against the morning slot', () => {
+      const slots = Code.perfRssSlots_(Date.parse('2026-11-17T13:05:00+09:00'), 2);
+      const item = Code.buildPerfHighlightItem_(slots[0], slots[1], data);
+      expect(item.title).toBe('11月17日 昼のハイライト');
+      expect(item.guid).toBe('perf-2026-11-17-noon');
+      expect(item.pubDate).toBe('Tue, 17 Nov 2026 03:30:00 GMT');
+      expect(item.descriptionText.split('\n')[0]).toBe(
+        '延べ4,222人(+7) / IG2,107 Th256 YT12 X1,847 / 再生572,709回(+2,709) / ' +
+          'ブログ(本日)5回 / X残高$39.41'
+      );
+      expect(item.descriptionText).toContain(
+        'SNS延べフォロワー数: 4,222人（前回配信から +7）'
+      );
+      expect(item.descriptionText).toContain(
+        '内訳: Instagram 2,107人（+2） / Threads 256人（±0） / YouTube 12人（±0） / X 1,847人（+5）'
+      );
+      expect(item.descriptionText).toContain(
+        'Instagram 過去30日の再生回数: 572,709回（前回配信から +2,709回）'
+      );
+      expect(item.descriptionText).toContain('ブログ（本日・途中経過）: 表示 5回');
+      expect(item.descriptionText).toContain(
+        'X クレジット消費（前回配信から）: $0.28（残高 $39.41）'
+      );
+      // Morning-only parts stay out of the diff items.
+      expect(item.descriptionText).not.toContain('【');
+      expect(item.descriptionText).not.toContain('よく読まれている記事');
+      expect(item.descriptionText).not.toContain('昨日の記事トップ');
     });
 
     it('includes a new post in the compact summary when the budget has room', () => {

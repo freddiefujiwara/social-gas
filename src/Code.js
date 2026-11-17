@@ -4301,6 +4301,20 @@ const SNS_HISTORY_BLOG_POSTS_COLUMNS = [
   'views_28d',
   'collected_at',
 ];
+// "blog_posts_daily" is keyed by date + canonical article
+// path: one row per article per JST day, so the highlight
+// feed can rank yesterday's articles (blog_posts only keeps
+// the 28-day window). The fetch re-reads the last
+// BLOG_POSTS_DAILY_WINDOW_DAYS days on every collection, so
+// GA4's late-arriving revisions land without a repair step.
+const SNS_HISTORY_BLOG_POSTS_DAILY_COLUMNS = [
+  'date',
+  'path',
+  'title',
+  'views',
+  'collected_at',
+];
+const BLOG_POSTS_DAILY_WINDOW_DAYS = 8;
 // Stage 2 (the read side serves the blog tab from the sheet)
 // added three more blog tabs to the same workbook:
 // "blog_pages" mirrors "blog_posts" but keeps EVERY page path,
@@ -5323,6 +5337,89 @@ function buildBlogPostsRows_(entries, collectedAt) {
   });
 }
 
+// The blog's per-article views per calendar day over the
+// last BLOG_POSTS_DAILY_WINDOW_DAYS days, merged under the
+// canonical /blog/<id> path like blog_posts (split path forms
+// are summed; the title comes from the most-viewed form that
+// day). Returns null when the report failed.
+function fetchBlogPostsDailyData_(propertyId) {
+  const nowMs = Date.now();
+  const rows = fetchBlogReportRows_(propertyId, {
+    startDate: jstDateKey_(
+      nowMs - (BLOG_POSTS_DAILY_WINDOW_DAYS - 1) * SNS_DAY_MS
+    ),
+    endDate: jstDateKey_(nowMs),
+    metrics: ['screenPageViews'],
+    dimensions: ['date', 'pagePath', 'pageTitle'],
+    limit: BLOG_POSTS_FETCH_LIMIT,
+    offset: 0,
+    filters: [],
+  });
+  if (!rows) {
+    return null;
+  }
+  const byDayPath = {};
+  rows.forEach((row) => {
+    const dimensionValues = (row && row.dimensionValues) || [];
+    const date = ga4DateKey_(dimensionValues[0] && dimensionValues[0].value);
+    if (!date) {
+      return;
+    }
+    const id = articleIdFromPath_(
+      dimensionValues[1] && dimensionValues[1].value
+    );
+    if (!id) {
+      return;
+    }
+    const path = '/blog/' + id;
+    const views = blogReportMetric_(row, 0) || 0;
+    const rawTitle = String(
+      (dimensionValues[2] && dimensionValues[2].value) || ''
+    );
+    const title = rawTitle === '(not set)' ? '' : rawTitle;
+    const key = date + '|' + path;
+    const existing = byDayPath[key];
+    if (!existing) {
+      byDayPath[key] = { date, path, title, views, topViews: views };
+      return;
+    }
+    existing.views += views;
+    if (views > existing.topViews) {
+      existing.topViews = views;
+      existing.title = title;
+    }
+  });
+  return Object.keys(byDayPath)
+    .map((key) => byDayPath[key])
+    .map((entry) => ({
+      date: entry.date,
+      path: entry.path,
+      title: entry.title,
+      views: entry.views,
+    }))
+    .sort((a, b) => {
+      if (a.date !== b.date) {
+        return a.date < b.date ? -1 : 1;
+      }
+      return b.views - a.views;
+    });
+}
+
+// One "blog_posts_daily" row per entry of
+// fetchBlogPostsDailyData_.
+function buildBlogPostsDailyRows_(entries, collectedAt) {
+  return (entries || []).map((entry) => {
+    const item = entry || {};
+    return [
+      snsHistoryTextCell_(item.date),
+      snsHistoryTextCell_(item.path),
+      snsHistoryTextCell_(item.title),
+      snsHistoryNumCell_(item.views),
+      snsHistoryTextCell_(collectedAt),
+    ];
+  });
+}
+
 // One "blog_pages" row per entry of fetchBlogPagesData_ — the
 // same row shape as blog_posts over the wider net.
 function buildBlogPagesRows_(entries, collectedAt) {
@@ -5664,6 +5761,20 @@ function appendBlogHistory_() {
       );
     } else {
       console.log('Blog history: posts report failed, blog_posts skipped');
+    }
+    const postsDaily = fetchBlogPostsDailyData_(propertyId);
+    if (postsDaily) {
+      upsertSnsHistorySheet_(
+        spreadsheet,
+        'blog_posts_daily',
+        SNS_HISTORY_BLOG_POSTS_DAILY_COLUMNS,
+        [0, 1],
+        buildBlogPostsDailyRows_(postsDaily, collectedAt)
+      );
+    } else {
+      console.log(
+        'Blog history: posts daily report failed, blog_posts_daily skipped'
+      );
     }
     const pages = fetchBlogPagesData_(propertyId);
     if (pages) {
@@ -8356,6 +8467,36 @@ function perfChannelSections_(slot, data) {
     }
     blogLines.push(line);
   }
+  const topDaily = (data.blogPostsDailyRows || [])
+    .filter((row) => {
+      const title = historyTextOrNull_(row && row.title);
+      return (
+        snsHistoryKeyCell_(row && row.date) === dateKey &&
+        title &&
+        title !== PERF_BLOG_GENERIC_TITLE &&
+        typeof snsNumberOrNull_(row.views) === 'number'
+      );
+    })
+    .map((row) => ({
+      title: historyTextOrNull_(row.title),
+      views: snsNumberOrNull_(row.views),
+    }))
+    .sort((a, b) => b.views - a.views)
+    .slice(0, 5);
+  if (topDaily.length) {
+    blogLines.push('昨日の記事トップ' + topDaily.length);
+    topDaily.forEach((entry, index) => {
+      blogLines.push(
+        index +
+          1 +
+          '. ' +
+          entry.title +
+          '（' +
+          perfFormatInt_(entry.views) +
+          '回）'
+      );
+    });
+  }
   addSection('ブログ', blogLines);
 
   return sections;
@@ -8370,6 +8511,13 @@ function perfChannelSections_(slot, data) {
 // separator line, then the full detail lines — the card's
 // expand view on the reader side reveals the whole text, so
 // nothing is lost by keeping the headline short.
+//
+// The morning item is the full report. The noon and evening
+// items are diffs against the previous slot instead: deltas
+// since the last delivery, today's running blog total, the
+// credit burn, and new posts — the per-channel "yesterday"
+// sections and the 28-day top article stay morning-only, as
+// they would repeat the same completed day.
 function buildPerfHighlightItem_(slot, prevSlot, data) {
   const snap = perfSnapshotAt_(data.accountRows, slot.atMs);
   if (!snap) {
@@ -8377,39 +8525,53 @@ function buildPerfHighlightItem_(slot, prevSlot, data) {
   }
   const dayAgo = perfSnapshotAt_(data.accountRows, slot.atMs - SNS_DAY_MS);
   const prev = prevSlot ? perfSnapshotAt_(data.accountRows, prevSlot.atMs) : null;
+  const isDiff = slot.key !== 'morning' && !!prev;
   const segments = [];
   const lines = [];
   if (typeof snap.total === 'number') {
+    const segmentBase = isDiff ? prev : dayAgo;
     segments.push(
       '延べ' +
         perfFormatInt_(snap.total) +
         '人' +
-        (dayAgo ? perfDeltaSuffix_(snap.total, dayAgo.total) : '')
+        (segmentBase ? perfDeltaSuffix_(snap.total, segmentBase.total) : '')
     );
     let line = 'SNS延べフォロワー数: ' + perfFormatInt_(snap.total) + '人';
-    const delta = dayAgo ? perfDeltaText_(snap.total, dayAgo.total) : '';
-    if (delta) {
-      line += '（前日比 ' + delta + '）';
+    if (isDiff) {
+      line +=
+        '（前回配信から ' + perfSignedText_(snap.total - prev.total) + '）';
+    } else {
+      const delta = dayAgo ? perfDeltaText_(snap.total, dayAgo.total) : '';
+      if (delta) {
+        line += '（前日比 ' + delta + '）';
+      }
     }
     lines.push(line);
   }
   const parts = [];
   const fullParts = [];
+  const fullPart = (name, value, prevValue) => {
+    let part = name + ' ' + perfFormatInt_(value) + '人';
+    if (isDiff && typeof prevValue === 'number') {
+      part += '（' + perfSignedText_(value - prevValue) + '）';
+    }
+    fullParts.push(part);
+  };
   if (typeof snap.ig === 'number') {
     parts.push('IG' + perfFormatInt_(snap.ig));
-    fullParts.push('Instagram ' + perfFormatInt_(snap.ig) + '人');
+    fullPart('Instagram', snap.ig, prev && prev.ig);
   }
   if (typeof snap.threads === 'number') {
     parts.push('Th' + perfFormatInt_(snap.threads));
-    fullParts.push('Threads ' + perfFormatInt_(snap.threads) + '人');
+    fullPart('Threads', snap.threads, prev && prev.threads);
   }
   if (typeof snap.youtube === 'number') {
     parts.push('YT' + perfFormatInt_(snap.youtube));
-    fullParts.push('YouTube ' + perfFormatInt_(snap.youtube) + '人');
+    fullPart('YouTube', snap.youtube, prev && prev.youtube);
   }
   if (typeof snap.x === 'number') {
     parts.push('X' + perfFormatInt_(snap.x));
-    fullParts.push('X ' + perfFormatInt_(snap.x) + '人');
+    fullPart('X', snap.x, prev && prev.x);
   }
   if (parts.length) {
     segments.push(parts.join(' '));
@@ -8430,17 +8592,49 @@ function buildPerfHighlightItem_(slot, prevSlot, data) {
     }
     lines.push(line);
   }
-  const blogDay = perfBlogDay_(data.blogDailyRows, slot.dateKey);
-  const blogSegment = perfBlogSegment_(blogDay);
-  if (blogSegment) {
-    segments.push(blogSegment);
-    lines.push(perfBlogLine_(blogDay));
+  let blogToday = null;
+  if (isDiff) {
+    (data.blogDailyRows || []).forEach((row) => {
+      if (snsHistoryKeyCell_(row && row.date) === slot.dateKey) {
+        const views = snsNumberOrNull_(row.views);
+        if (typeof views === 'number') {
+          blogToday = views;
+        }
+      }
+    });
+  }
+  if (typeof blogToday === 'number') {
+    segments.push('ブログ(本日)' + perfFormatInt_(blogToday) + '回');
+    lines.push(
+      'ブログ（本日・途中経過）: 表示 ' + perfFormatInt_(blogToday) + '回'
+    );
+  } else {
+    const blogDay = perfBlogDay_(data.blogDailyRows, slot.dateKey);
+    const blogSegment = perfBlogSegment_(blogDay);
+    if (blogSegment) {
+      segments.push(blogSegment);
+      lines.push(perfBlogLine_(blogDay));
+    }
   }
   if (typeof snap.balance === 'number') {
     segments.push('X残高$' + snap.balance.toFixed(2));
-    lines.push('X クレジット残高: $' + snap.balance.toFixed(2));
+    const spent =
+      isDiff && typeof prev.balance === 'number'
+        ? prev.balance - snap.balance
+        : 0;
+    if (spent > 0) {
+      lines.push(
+        'X クレジット消費（前回配信から）: $' +
+          spent.toFixed(2) +
+          '（残高 $' +
+          snap.balance.toFixed(2) +
+          '）'
+      );
+    } else {
+      lines.push('X クレジット残高: $' + snap.balance.toFixed(2));
+    }
   }
-  const topPost = perfTopBlogPost_(data.blogPostRows);
+  const topPost = isDiff ? null : perfTopBlogPost_(data.blogPostRows);
   if (topPost) {
     segments.push(
       '人気記事: ' + topPost.title + ' ' + perfFormatInt_(topPost.views) + '回'
@@ -8461,7 +8655,7 @@ function buildPerfHighlightItem_(slot, prevSlot, data) {
       }
     );
   }
-  const sections = perfChannelSections_(slot, data);
+  const sections = isDiff ? [] : perfChannelSections_(slot, data);
   if (sections.length) {
     lines.push('');
     sections.forEach((line) => lines.push(line));
@@ -8552,6 +8746,12 @@ function servePerfRss_(parameter) {
             spreadsheet,
             'blog_posts',
             SNS_HISTORY_BLOG_POSTS_COLUMNS
+          ) || [],
+        blogPostsDailyRows:
+          readHistoryTabObjects_(
+            spreadsheet,
+            'blog_posts_daily',
+            SNS_HISTORY_BLOG_POSTS_DAILY_COLUMNS
           ) || [],
         mediaRows:
           readHistoryTabObjects_(
@@ -9005,6 +9205,8 @@ if (typeof exports !== 'undefined') {
   exports.buildBlogDailyRows_ = buildBlogDailyRows_;
   exports.fetchBlogPostsData_ = fetchBlogPostsData_;
   exports.buildBlogPostsRows_ = buildBlogPostsRows_;
+  exports.fetchBlogPostsDailyData_ = fetchBlogPostsDailyData_;
+  exports.buildBlogPostsDailyRows_ = buildBlogPostsDailyRows_;
   exports.fetchBlogPathRows_ = fetchBlogPathRows_;
   exports.mergeBlogPathRows_ = mergeBlogPathRows_;
   exports.canonicalBlogPath_ = canonicalBlogPath_;
@@ -9088,6 +9290,8 @@ if (typeof exports !== 'undefined') {
   exports.SNS_HISTORY_THREADS_ACCOUNT_COLUMNS = SNS_HISTORY_THREADS_ACCOUNT_COLUMNS;
   exports.SNS_HISTORY_BLOG_DAILY_COLUMNS = SNS_HISTORY_BLOG_DAILY_COLUMNS;
   exports.SNS_HISTORY_BLOG_POSTS_COLUMNS = SNS_HISTORY_BLOG_POSTS_COLUMNS;
+  exports.SNS_HISTORY_BLOG_POSTS_DAILY_COLUMNS =
+    SNS_HISTORY_BLOG_POSTS_DAILY_COLUMNS;
   exports.SNS_HISTORY_BLOG_PAGES_COLUMNS = SNS_HISTORY_BLOG_PAGES_COLUMNS;
   exports.SNS_HISTORY_BLOG_TOTALS_COLUMNS = SNS_HISTORY_BLOG_TOTALS_COLUMNS;
   exports.SNS_HISTORY_BLOG_SOURCES_COLUMNS = SNS_HISTORY_BLOG_SOURCES_COLUMNS;

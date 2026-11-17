@@ -1480,6 +1480,12 @@ describe('SNS follower counts', () => {
           ga4Row(['/', 'トップ'], [999]),
           ga4Row(['/blog/', 'ブログトップ'], [50]),
         ],
+        postsDaily: [
+          ga4Row(['20261108', '/1abcdefghijklmnopqrstuvwx', '記事タイトルA'], [10]),
+          ga4Row(['20261108', '/blog/1abcdefghijklmnopqrstuvwx', '記事タイトルA別形'], [5]),
+          ga4Row(['20261108', '/', 'トップ'], [999]),
+          ga4Row(['20261109', '/blog/2abcdefghijklmnopqrstuvwx', '(not set)'], [3]),
+        ],
         rangeTotals: [ga4Row([], [1000, 300, 500])],
         sources: [
           ga4Row(['Organic Search'], [800]),
@@ -1503,6 +1509,9 @@ describe('SNS follower counts', () => {
         }
         if (filterText.includes('article_render')) {
           return res(200, { rows: bodies.render });
+        }
+        if (dimensions.includes('date') && dimensions.includes('pagePath')) {
+          return res(200, { rows: bodies.postsDaily });
         }
         if (dimensions.includes('pagePath')) {
           return res(200, { rows: bodies.posts });
@@ -1669,6 +1678,50 @@ describe('SNS follower counts', () => {
       );
       expect(postsBody.dateRanges).toEqual([
         { startDate: '28daysAgo', endDate: 'today' },
+      ]);
+    });
+
+    it('merges daily article views under date + canonical path', () => {
+      mockGa4Blog();
+      const daily = Code.fetchBlogPostsDailyData_('561730442');
+      expect(daily).toEqual([
+        {
+          date: '2026-11-08',
+          path: '/blog/1abcdefghijklmnopqrstuvwx',
+          title: '記事タイトルA',
+          views: 15,
+        },
+        {
+          date: '2026-11-09',
+          path: '/blog/2abcdefghijklmnopqrstuvwx',
+          title: '',
+          views: 3,
+        },
+      ]);
+      expect(
+        Code.buildBlogPostsDailyRows_(daily, '2026-11-09T03:00:00.000Z')
+      ).toEqual([
+        [
+          '2026-11-08',
+          '/blog/1abcdefghijklmnopqrstuvwx',
+          '記事タイトルA',
+          15,
+          '2026-11-09T03:00:00.000Z',
+        ],
+        [
+          '2026-11-09',
+          '/blog/2abcdefghijklmnopqrstuvwx',
+          '',
+          3,
+          '2026-11-09T03:00:00.000Z',
+        ],
+      ]);
+      const dailyBody = ga4Requests.find((body) => {
+        const dims = (body.dimensions || []).map((d) => d.name);
+        return dims.includes('date') && dims.includes('pagePath');
+      });
+      expect(dailyBody.dateRanges).toEqual([
+        { startDate: '2026-11-02', endDate: '2026-11-09' },
       ]);
     });
 
