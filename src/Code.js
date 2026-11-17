@@ -601,6 +601,7 @@ function issueShareToken() {
 const SNS_SNAPSHOT_PROPERTY = 'SNS_COUNTS_SNAPSHOT';
 const SNS_YOUTUBE_CHANNEL_ID = 'UCbiDZXbr391oT_vsRiqwPFg';
 const SNS_INSTAGRAM_MAIN_ID = '17841401041540002'; // @freddiefujiwara
+const SNS_FACEBOOK_PAGE_ID = '362616541057810'; // Page "freddiefujiwara"
 const SNS_INSTAGRAM_SUB_ID = '17841434285478967'; // @anemone_cancer
 const SNS_THREADS_USER_ID = '17841462976834295'; // @freddiefujiwara
 const META_GRAPH_BASE = 'https://graph.facebook.com/v25.0/';
@@ -7950,7 +7951,37 @@ function collectThreadsReplies_(spreadsheet, snapshot, collectedAt) {
 // the Facebook Login path is a Page surface, so the user token
 // alone cannot read conversations. Returns
 // { pageId, pageToken, error }.
+//
+// The known page is asked directly first: /me/accounts returns
+// no pages at all for the stored token (no page was selected
+// when the token was granted), while the page itself answers,
+// carries the Instagram link, and hands out its Page token.
+// The /me/accounts scan stays as a fallback in case the page
+// ever becomes visible through the list again.
 function resolveInstagramPage_(userToken) {
+  const direct = fetchInsightsJson_(
+    META_GRAPH_BASE +
+      SNS_FACEBOOK_PAGE_ID +
+      '?' +
+      graphFieldsParam_('id,access_token,instagram_business_account{id}') +
+      '&access_token=' +
+      encodeURIComponent(userToken)
+  );
+  if (!direct.error && direct.data) {
+    const linkedDirect =
+      direct.data.instagram_business_account &&
+      direct.data.instagram_business_account.id;
+    if (
+      linkedDirect != null &&
+      String(linkedDirect) === SNS_INSTAGRAM_MAIN_ID
+    ) {
+      return {
+        pageId: String(direct.data.id),
+        pageToken: direct.data.access_token || '',
+        error: null,
+      };
+    }
+  }
   const res = fetchInsightsJson_(
     META_GRAPH_BASE +
       'me/accounts?' +

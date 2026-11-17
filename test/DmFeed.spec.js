@@ -75,6 +75,9 @@ describe('Instagram DM collection and RSS', () => {
 
   const routeFetches = ({ conversations = [], messagesByConv = {} } = {}) => {
     fetchHandler = (url) => {
+      if (url.includes('/362616541057810')) {
+        return res(200, linkedPage);
+      }
       if (url.includes('/me/accounts')) {
         return res(200, accountsPage([linkedPage]));
       }
@@ -156,15 +159,34 @@ describe('Instagram DM collection and RSS', () => {
 
   describe('resolveInstagramPage_', () => {
     it('returns the page linked to the main Instagram account', () => {
+      // The known page is asked directly: /me/accounts returns no
+      // pages for the stored token, so the list must not be used.
       fetchHandler = (url) => {
-        expect(url).toContain('/me/accounts');
-        return res(
-          200,
-          accountsPage([
-            { id: '999', access_token: 'other', instagram_business_account: { id: '42' } },
-            linkedPage,
-          ])
-        );
+        if (url.includes('/362616541057810')) {
+          return res(200, linkedPage);
+        }
+        throw new Error('the accounts list must not be needed: ' + url);
+      };
+      expect(Code.resolveInstagramPage_('user-token')).toEqual({
+        pageId: PAGE_ID,
+        pageToken: 'page-token',
+        error: null,
+      });
+    });
+
+    it('falls back to the accounts list when the direct page is not linked', () => {
+      fetchHandler = (url) => {
+        if (url.includes('/362616541057810')) {
+          return res(200, {
+            id: '362616541057810',
+            access_token: 'other',
+            instagram_business_account: { id: '42' },
+          });
+        }
+        if (url.includes('/me/accounts')) {
+          return res(200, accountsPage([linkedPage]));
+        }
+        throw new Error('unexpected fetch: ' + url);
       };
       expect(Code.resolveInstagramPage_('user-token')).toEqual({
         pageId: PAGE_ID,
@@ -174,7 +196,12 @@ describe('Instagram DM collection and RSS', () => {
     });
 
     it('reports when no page is linked to the account', () => {
-      fetchHandler = () => res(200, accountsPage([{ id: '999' }]));
+      fetchHandler = (url) => {
+        if (url.includes('/362616541057810')) {
+          return res(200, { id: '362616541057810' });
+        }
+        return res(200, accountsPage([{ id: '999' }]));
+      };
       const page = Code.resolveInstagramPage_('user-token');
       expect(page.pageId).toBeNull();
       expect(page.error).toContain('no linked page');
@@ -185,10 +212,12 @@ describe('Instagram DM collection and RSS', () => {
       // a URL with literal braces, which killed the /me/accounts
       // call before any request was sent.
       fetchHandler = (url) => {
-        expect(url).toContain('/me/accounts');
         expect(url).toContain('instagram_business_account%7Bid%7D');
         expect(url).not.toContain('{');
         expect(url).not.toContain('}');
+        if (url.includes('/362616541057810')) {
+          return res(200, linkedPage);
+        }
         return res(200, accountsPage([linkedPage]));
       };
       expect(Code.resolveInstagramPage_('user-token').error).toBeNull();
@@ -322,6 +351,9 @@ describe('Instagram DM collection and RSS', () => {
 
     it('degrades to an error summary when the page cannot be resolved', () => {
       fetchHandler = (url) => {
+        if (url.includes('/362616541057810')) {
+          return res(200, { id: '362616541057810' });
+        }
         if (url.includes('/me/accounts')) {
           return res(200, accountsPage([]));
         }
@@ -334,6 +366,9 @@ describe('Instagram DM collection and RSS', () => {
 
     it('keeps collecting other conversations when one fetch fails', () => {
       fetchHandler = (url) => {
+        if (url.includes('/362616541057810')) {
+          return res(200, linkedPage);
+        }
         if (url.includes('/me/accounts')) {
           return res(200, accountsPage([linkedPage]));
         }
