@@ -24,6 +24,15 @@ describe('Performance highlights RSS', () => {
 
   // 2026-11-16 05:20 JST / 20:20 JST, 2026-11-17 05:20 JST.
   const accountRows = [
+    accountRow('2026-11-15T14:20:00.000Z', {
+      total_followers: 4190,
+      ig_followers: 2080,
+      threads_followers: 253,
+      youtube_subscribers: 12,
+      x_followers: 1841,
+      views_30d: 550000,
+      x_api_balance_usd: 40.9,
+    }),
     accountRow('2026-11-15T20:20:00.000Z', {
       total_followers: 4193,
       ig_followers: 2086,
@@ -113,7 +122,49 @@ describe('Performance highlights RSS', () => {
         {
           posted_at: '2026-11-15T15:00:00.000Z',
           caption: '前の投稿',
+          views: 100,
+          saves: 1,
+          shares: 0,
         },
+        {
+          posted_at: '2026-11-16T03:00:00+0000',
+          caption: '昨日のリールA',
+          views: 5000,
+          saves: 250,
+          shares: 40,
+          avg_watch_sec: 10,
+          duration_sec: 20,
+        },
+        {
+          posted_at: '2026-11-16T10:00:00+0000',
+          caption: '昨日のリールB',
+          views: 1200,
+          saves: 12,
+          shares: 3,
+          avg_watch_sec: 5,
+          duration_sec: 25,
+        },
+      ],
+      dailyRows: [{ date: '2026-11-16', follows: 25, unfollows: 7 }],
+      threadsMediaRows: [
+        {
+          posted_at: '2026-11-16T02:00:00+0000',
+          text: '昨日のThreads投稿',
+          views: 300,
+          replies: 2,
+        },
+        {
+          posted_at: '2026-11-16T05:00:00+0000',
+          text: 'もう1件の投稿',
+          views: 120,
+          replies: 0,
+        },
+      ],
+      youtubeMediaRows: [
+        { published_at: '2026-11-16T04:00:00Z', title: '昨日の動画', views: 88 },
+      ],
+      xMediaRows: [
+        { posted_at: '2026-11-16T01:00:00.000Z', text: '昨日のポスト', views: 450 },
       ],
     };
 
@@ -150,7 +201,34 @@ describe('Performance highlights RSS', () => {
       );
       expect(item.descriptionText).toContain('X クレジット残高: $39.69');
       expect(item.descriptionText).toContain('新規投稿: 新しいリール');
-      expect(item.descriptionText).not.toContain('前の投稿');
+      expect(item.descriptionText).not.toContain('新規投稿: 前の投稿');
+      // Per-channel "yesterday" sections follow the summary.
+      expect(item.descriptionText).toContain('【Instagram 昨日（11月16日）】');
+      expect(item.descriptionText).toContain('フォロワー +18（フォロー 25 / 解除 7）');
+      expect(item.descriptionText).toContain('投稿 3件（再生順）');
+      expect(item.descriptionText).toContain('・前の投稿: 再生100回 / 保存1 / シェア0');
+      expect(item.descriptionText).toContain(
+        '・昨日のリールA: 再生5,000回 / 保存250 / シェア40 / 視聴率50%'
+      );
+      expect(item.descriptionText).toContain(
+        '・昨日のリールB: 再生1,200回 / 保存12 / シェア3 / 視聴率20%'
+      );
+      expect(item.descriptionText).toContain('保存率トップ: 昨日のリールA（5.0%）');
+      expect(item.descriptionText).toContain('【Threads 昨日（11月16日）】');
+      expect(item.descriptionText).toContain('フォロワー +2');
+      expect(item.descriptionText).toContain(
+        '投稿 2件 / 最多表示: 昨日のThreads投稿（表示300回・返信2）'
+      );
+      expect(item.descriptionText).toContain('【YouTube 昨日（11月16日）】');
+      expect(item.descriptionText).toContain('登録者 ±0');
+      expect(item.descriptionText).toContain('新規動画: 昨日の動画（再生88回）');
+      expect(item.descriptionText).toContain('【X 昨日（11月16日）】');
+      expect(item.descriptionText).toContain(
+        'ポスト 1件 / 最多表示: 昨日のポスト（表示450回）'
+      );
+      expect(item.descriptionText).toContain('クレジット消費: $1.01（残高 $39.89）');
+      expect(item.descriptionText).toContain('【ブログ 昨日（11月16日）】');
+      expect(item.descriptionText).toContain('表示 48回（前日比 +18）');
     });
 
     it('includes a new post in the compact summary when the budget has room', () => {
