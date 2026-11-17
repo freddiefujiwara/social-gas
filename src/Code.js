@@ -7337,7 +7337,8 @@ function htmlOut_(html) {
 //     posted_at is over 60 days old are pruned on the same run —
 //     the window /reader itself keeps.
 //   - GET /exec?action=comments_rss&source=instagram|threads
-//     &token=... returns the newest 50 stored rows as RSS. The
+//     |instagram_dm&token=... returns the newest 50 stored
+//     rows as RSS. The
 //     request never calls the platform APIs; it only reads the
 //     tabs. The token must match the Script Property
 //     COMMENTS_RSS_TOKEN (the shared-token pattern of the
@@ -7346,10 +7347,17 @@ function htmlOut_(html) {
 //     alone exposes nothing — the feed carries comment text and
 //     is never served unauthenticated.
 //
-// Scope prerequisites (both re-authorized by the owner; the code
+// Scope prerequisites (re-authorized by the owner; the code
 // degrades to per-source errors without them): IG needs
 // instagram_manage_comments on the Meta token, Threads needs
-// threads_read_replies (see the THREADS_OAUTH_SCOPES change).
+// threads_read_replies (see the THREADS_OAUTH_SCOPES change),
+// and the DM collection additionally needs
+// instagram_manage_messages plus pages_manage_metadata /
+// pages_read_engagement / pages_show_list on the Meta token —
+// Instagram messaging on the Facebook Login path runs through
+// the linked Facebook Page and its Page access token. The
+// Instagram app's "allow access to messages" toggle (message
+// controls / connected tools) must also be on.
 // A post's first-ever detail fetch reaches back only a fixed
 // grace window before the previous collection observed the
 // post, so enabling the feature does not flood the feed with
@@ -7383,6 +7391,32 @@ const SNS_HISTORY_THREADS_REPLIES_COLUMNS = [
   'permalink',
   'collected_at',
 ];
+const SNS_IG_DM_TAB = 'ig_dm';
+// Instagram direct messages (received ones only), collected
+// through the linked Page's conversations edge — see
+// collectInstagramDm_. Keyed by the platform's message id,
+// like the comment tabs. Conversations have no public
+// permalink, so every row points at the inbox.
+const SNS_HISTORY_IG_DM_COLUMNS = [
+  'message_id',
+  'conversation_id',
+  'username',
+  'text',
+  'posted_at',
+  'permalink',
+  'collected_at',
+];
+const SNS_IG_DM_INBOX_URL = 'https://www.instagram.com/direct/inbox/';
+// Conversations scanned per collection and messages read per
+// conversation. The cadence is hourly and dedupe is by message
+// id, so these windows only bound the API fan-out; a message
+// is stored the first time it appears inside them.
+const SNS_DM_CONVERSATION_LIMIT = 10;
+const SNS_DM_MESSAGE_LIMIT = 25;
+// Placeholder text for a message with no text body (an image,
+// a shared post, a voice note): the arrival itself is what the
+// feed reports, so the row is kept with this marker.
+const SNS_DM_ATTACHMENT_TEXT = '（添付メッセージ）';
 // Stored comments older than this are pruned during collection;
 // it matches the retention /reader applies to its local store.
 const SNS_COMMENTS_RETENTION_DAYS = 60;
@@ -7425,6 +7459,14 @@ const COMMENTS_RSS_CHANNELS = {
     title: 'Threads 返信（@freddiefujiwara）',
     link: 'https://www.threads.net/@freddiefujiwara',
     description: '自分の Threads 投稿への返信',
+  },
+  instagram_dm: {
+    tab: SNS_IG_DM_TAB,
+    columns: SNS_HISTORY_IG_DM_COLUMNS,
+    idColumn: 'message_id',
+    title: 'Instagram DM（@freddiefujiwara）',
+    link: SNS_IG_DM_INBOX_URL,
+    description: 'Instagram で受け取ったダイレクトメッセージ',
   },
 };
 
@@ -7870,6 +7912,238 @@ function collectThreadsReplies_(spreadsheet, snapshot, collectedAt) {
   return result;
 }
 
+// Resolves the Facebook Page linked to the main Instagram
+// account, with its Page access token: Instagram messaging on
+// the Facebook Login path is a Page surface, so the user token
+// alone cannot read conversations. Returns
+// { pageId, pageToken, error }.
+function resolveInstagramPage_(userToken) {
+  const res = fetchInsightsJson_(
+    META_GRAPH_BASE +
+      'me/accounts?fields=id,access_token,instagram_business_account{id}' +
+      '&limit=50&access_token=' +
+      encodeURIComponent(userToken)
+  );
+  if (res.error) {
+    return { pageId: null, pageToken: null, error: res.error };
+  }
+  const pages = res.data && Array.isArray(res.data.data) ? res.data.data : [];
+  for (let i = 0; i < pages.length; i++) {
+    const page = pages[i];
+    const linked =
+      page && page.instagram_business_account
+        ? page.instagram_business_account.id
+        : null;
+    if (linked != null && String(linked) === SNS_INSTAGRAM_MAIN_ID) {
+      return {
+        pageId: String(page.id),
+        pageToken: page.access_token || '',
+        error: null,
+      };
+    }
+  }
+  return {
+    pageId: null,
+    pageToken: null,
+    error: 'no linked page found for the Instagram account',
+  };
+}
+
+// One conversation's messages page flattened to plain message
+// objects, received ones only: a message the owner sent (from
+// the Page or from the Instagram account itself, depending on
+// which identity the API echoes) is dropped, as in the Threads
+// half. A message with no text body keeps the attachment
+// placeholder so its arrival still reaches the feed.
+function parseInstagramDmMessages_(data, pageId) {
+  const items = data && Array.isArray(data.data) ? data.data : [];
+  const messages = [];
+  items.forEach((item) => {
+    if (!item || item.id == null) {
+      return;
+    }
+    const from = item.from || {};
+    const fromId = from.id != null ? String(from.id) : '';
+    if (fromId === String(pageId) || fromId === SNS_INSTAGRAM_MAIN_ID) {
+      return;
+    }
+    const text =
+      item.message != null && String(item.message) !== ''
+        ? String(item.message)
+        : SNS_DM_ATTACHMENT_TEXT;
+    messages.push({
+      id: String(item.id),
+      username:
+        from.username != null
+          ? String(from.username)
+          : from.name != null
+            ? String(from.name)
+            : '',
+      text,
+      posted_at: item.created_time || '',
+    });
+  });
+  return messages;
+}
+
+// Fetches the id list of the Page's Instagram conversations,
+// most recently updated first. Returns { ids, error }.
+function fetchInstagramConversations_(pageId, pageToken) {
+  const res = fetchInsightsJson_(
+    META_GRAPH_BASE +
+      pageId +
+      '/conversations?platform=instagram&fields=id&limit=' +
+      SNS_DM_CONVERSATION_LIMIT +
+      '&access_token=' +
+      encodeURIComponent(pageToken)
+  );
+  if (res.error) {
+    return { ids: null, error: res.error };
+  }
+  if (!res.data || !Array.isArray(res.data.data)) {
+    return { ids: null, error: 'response had no conversations array' };
+  }
+  return {
+    ids: res.data.data
+      .filter((entry) => entry && entry.id != null)
+      .map((entry) => String(entry.id)),
+    error: null,
+  };
+}
+
+// Fetches one conversation's latest messages page. Returns
+// { messages, error } like fetchInstagramComments_.
+function fetchInstagramConversationMessages_(conversationId, pageId, pageToken) {
+  const res = fetchInsightsJson_(
+    META_GRAPH_BASE +
+      conversationId +
+      '/messages?fields=id,created_time,from{id,username,name},message' +
+      '&limit=' +
+      SNS_DM_MESSAGE_LIMIT +
+      '&access_token=' +
+      encodeURIComponent(pageToken)
+  );
+  if (res.error) {
+    return {
+      messages: null,
+      error: String(conversationId) + ': ' + res.error,
+    };
+  }
+  if (!res.data || !Array.isArray(res.data.data)) {
+    return {
+      messages: null,
+      error: String(conversationId) + ': response had no messages array',
+    };
+  }
+  return {
+    messages: parseInstagramDmMessages_(res.data, pageId),
+    error: null,
+  };
+}
+
+// The Instagram DM half of the comments collection: scans the
+// recent conversations of the linked Page and upserts the
+// received messages that are not stored yet into ig_dm.
+// Unlike the comment halves there is no count to diff — a
+// conversation's message list is cheap to re-read and the
+// message-id upsert dedupes — so nothing depends on a
+// boundary the platform's numbers can outrun. The one
+// exception is the first-ever run: while the tab holds no
+// rows at all, only the last SNS_COMMENTS_BOUNDARY_GRACE_MS
+// of messages is imported, so enabling the feature does not
+// flood the feed with the inbox's history. Returns
+// { stored, error } like the other halves; failures are
+// summarized, never thrown.
+function collectInstagramDm_(spreadsheet, collectedAt) {
+  const result = { stored: 0, error: null };
+  const token = getScriptProperty_('META_ACCESS_TOKEN');
+  if (!token) {
+    return result;
+  }
+  const page = resolveInstagramPage_(token);
+  if (page.error) {
+    result.error = page.error;
+    return result;
+  }
+  const conversations = fetchInstagramConversations_(
+    page.pageId,
+    page.pageToken
+  );
+  if (conversations.error) {
+    result.error = conversations.error;
+    return result;
+  }
+  const storedRows =
+    readHistoryTabObjects_(
+      spreadsheet,
+      SNS_IG_DM_TAB,
+      SNS_HISTORY_IG_DM_COLUMNS
+    ) || [];
+  const storedIds = {};
+  storedRows.forEach((row) => {
+    const id = historyTextOrNull_(row.message_id);
+    if (id) {
+      storedIds[id] = true;
+    }
+  });
+  const firstRun = storedRows.length === 0;
+  const firstRunSince = firstRun
+    ? Date.parse(collectedAt || '') - SNS_COMMENTS_BOUNDARY_GRACE_MS
+    : NaN;
+  const failures = [];
+  const newRows = [];
+  conversations.ids.forEach((conversationId) => {
+    const fetched = fetchInstagramConversationMessages_(
+      conversationId,
+      page.pageId,
+      page.pageToken
+    );
+    if (fetched.error) {
+      failures.push(fetched.error);
+      return;
+    }
+    fetched.messages.forEach((message) => {
+      if (storedIds[message.id]) {
+        return;
+      }
+      if (firstRun) {
+        const at = Date.parse(message.posted_at || '');
+        if (!Number.isFinite(at) || at <= firstRunSince) {
+          return;
+        }
+      }
+      storedIds[message.id] = true;
+      newRows.push([
+        snsHistoryTextCell_(message.id),
+        snsHistoryTextCell_(conversationId),
+        snsHistoryTextCell_(message.username),
+        snsHistoryTextCell_(message.text.slice(0, SNS_CAPTION_MAX_LENGTH)),
+        snsHistoryTextCell_(message.posted_at),
+        snsHistoryTextCell_(SNS_IG_DM_INBOX_URL),
+        snsHistoryTextCell_(collectedAt),
+      ]);
+    });
+  });
+  if (newRows.length) {
+    upsertSnsHistorySheet_(
+      spreadsheet,
+      SNS_IG_DM_TAB,
+      SNS_HISTORY_IG_DM_COLUMNS,
+      0,
+      newRows
+    );
+    result.stored = newRows.length;
+  }
+  pruneOldCommentRows_(spreadsheet, SNS_IG_DM_TAB, SNS_HISTORY_IG_DM_COLUMNS);
+  result.error = failures.length
+    ? failures.length +
+      ' conversation message fetches failed (' +
+      failures[0] +
+      ')'
+    : null;
+  return result;
+}
+
 // The collection entry point collectSnsCounts() calls (before
 // appendSnsHistory_, whose upsert would erase the baseline).
 // No-op while the history sheet is unconfigured, and never
@@ -7891,6 +8165,10 @@ function collectPostComments_(snapshot) {
     const th = collectThreadsReplies_(spreadsheet, snapshot, collectedAt);
     if (th.error) {
       console.log('Threads replies error: ' + th.error);
+    }
+    const dm = collectInstagramDm_(spreadsheet, collectedAt);
+    if (dm.error) {
+      console.log('Instagram DM error: ' + dm.error);
     }
   } catch (err) {
     console.log(
@@ -9258,6 +9536,12 @@ if (typeof exports !== 'undefined') {
   exports.collectPostComments_ = collectPostComments_;
   exports.collectInstagramComments_ = collectInstagramComments_;
   exports.collectThreadsReplies_ = collectThreadsReplies_;
+  exports.collectInstagramDm_ = collectInstagramDm_;
+  exports.resolveInstagramPage_ = resolveInstagramPage_;
+  exports.parseInstagramDmMessages_ = parseInstagramDmMessages_;
+  exports.fetchInstagramConversations_ = fetchInstagramConversations_;
+  exports.fetchInstagramConversationMessages_ =
+    fetchInstagramConversationMessages_;
   exports.previousCountsById_ = previousCountsById_;
   exports.planCommentTargets_ = planCommentTargets_;
   exports.filterCommentsAfter_ = filterCommentsAfter_;
@@ -9285,6 +9569,8 @@ if (typeof exports !== 'undefined') {
   exports.SNS_HISTORY_IG_COMMENTS_COLUMNS = SNS_HISTORY_IG_COMMENTS_COLUMNS;
   exports.SNS_HISTORY_THREADS_REPLIES_COLUMNS =
     SNS_HISTORY_THREADS_REPLIES_COLUMNS;
+  exports.SNS_HISTORY_IG_DM_COLUMNS = SNS_HISTORY_IG_DM_COLUMNS;
+  exports.SNS_IG_DM_TAB = SNS_IG_DM_TAB;
   exports.SNS_COMMENTS_RETENTION_DAYS = SNS_COMMENTS_RETENTION_DAYS;
   exports.SNS_COMMENTS_RSS_LIMIT = SNS_COMMENTS_RSS_LIMIT;
   exports.openHistorySpreadsheet_ = openHistorySpreadsheet_;
