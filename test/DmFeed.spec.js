@@ -179,6 +179,32 @@ describe('Instagram DM collection and RSS', () => {
       expect(page.pageId).toBeNull();
       expect(page.error).toContain('no linked page');
     });
+
+    it('encodes the nested fields value so UrlFetchApp accepts the URL', () => {
+      // Regression: UrlFetchApp.fetch throws "Invalid argument" on
+      // a URL with literal braces, which killed the /me/accounts
+      // call before any request was sent.
+      fetchHandler = (url) => {
+        expect(url).toContain('/me/accounts');
+        expect(url).toContain('instagram_business_account%7Bid%7D');
+        expect(url).not.toContain('{');
+        expect(url).not.toContain('}');
+        return res(200, accountsPage([linkedPage]));
+      };
+      expect(Code.resolveInstagramPage_('user-token').error).toBeNull();
+    });
+
+    it('reports the fetch reason without leaking the token', () => {
+      fetchHandler = (url) => {
+        throw new Error('Invalid argument: ' + url);
+      };
+      const page = Code.resolveInstagramPage_('user-token');
+      expect(page.pageId).toBeNull();
+      expect(page.error).toContain('fetch exception (Error)');
+      expect(page.error).toContain('Invalid argument');
+      expect(page.error).not.toContain('user-token');
+      expect(page.error).not.toContain('access_token');
+    });
   });
 
   describe('parseInstagramDmMessages_', () => {
@@ -239,6 +265,28 @@ describe('Instagram DM collection and RSS', () => {
       const second = Code.collectInstagramDm_(spreadsheet, T1);
       expect(second).toEqual({ stored: 0, error: null });
       expect(sheets.ig_dm.rows).toHaveLength(2);
+    });
+
+    it('encodes the nested from fields value in the messages URL', () => {
+      // Same UrlFetchApp "Invalid argument" regression as the
+      // /me/accounts call: literal braces in the URL throw
+      // before any request is sent.
+      routeFetches({
+        conversations: ['conv1'],
+        messagesByConv: {
+          conv1: [
+            dm('m1', 'user-a', { username: 'alice' }, 'はじめまして', '2026-11-17T00:10:00+0000'),
+          ],
+        },
+      });
+      const result = Code.collectInstagramDm_(spreadsheet, T1);
+      expect(result).toEqual({ stored: 1, error: null });
+      const messagesUrl = fetchCalls.find((call) =>
+        call.url.includes('/conv1/messages')
+      ).url;
+      expect(messagesUrl).toContain('from%7Bid%2Cusername%2Cname%7D');
+      expect(messagesUrl).not.toContain('{');
+      expect(messagesUrl).not.toContain('}');
     });
 
     it('imports only the last 48 hours on the first-ever run', () => {

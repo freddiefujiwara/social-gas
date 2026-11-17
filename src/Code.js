@@ -1927,19 +1927,48 @@ function fetchInstagramViewsInsights_() {
   return result;
 }
 
+// Builds a fields= query fragment with the value encoded.
+// UrlFetchApp.fetch throws "Invalid argument" on a URL with
+// literal braces, and Graph API nested field expansion
+// (instagram_business_account{id}, replies{...}, from{...})
+// uses them, so the fields value must be percent-encoded.
+function graphFieldsParam_(fields) {
+  return 'fields=' + encodeURIComponent(fields);
+}
+
+// Trims an UrlFetchApp exception message for the log. The message
+// can embed the request URL, which carries the access token, so
+// the URL (and any access_token fragment) is removed entirely;
+// what remains is the reason, e.g. "Invalid argument".
+function sanitizeFetchErrorDetail_(message) {
+  return String(message || '')
+    .replace(/https?:\/\/\S+/g, '<url>')
+    .replace(/access_token[^,\s]*/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200);
+}
+
 // Fetches an insights URL and returns { data, error }: data is the
 // parsed JSON body on HTTP 200 (otherwise null) and error is a short
-// secret-free summary of what went wrong (otherwise null). Exception
-// messages are reduced to the error name because UrlFetchApp messages
-// can embed the failing URL, which carries the access token.
+// secret-free summary of what went wrong (otherwise null). The
+// exception message is reduced to the error name plus the
+// sanitized reason, so no request URL or access token leaks.
 function fetchInsightsJson_(url) {
   let res;
   try {
     res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
   } catch (err) {
+    const detail = sanitizeFetchErrorDetail_(
+      err && err.message ? err.message : ''
+    );
     return {
       data: null,
-      error: 'fetch exception (' + ((err && err.name) || 'Error') + ')',
+      error:
+        'fetch exception (' +
+        ((err && err.name) || 'Error') +
+        ')' +
+        (detail ? ': ' + detail : ''),
     };
   }
   const status = res.getResponseCode();
@@ -7616,8 +7645,12 @@ function fetchInstagramComments_(mediaId, token) {
   const res = fetchInsightsJson_(
     META_GRAPH_BASE +
       mediaId +
-      '/comments?fields=id,text,username,timestamp,like_count,' +
-      'replies{id,text,username,timestamp,like_count}&limit=' +
+      '/comments?' +
+      graphFieldsParam_(
+        'id,text,username,timestamp,like_count,' +
+          'replies{id,text,username,timestamp,like_count}'
+      ) +
+      '&limit=' +
       SNS_COMMENTS_PAGE_LIMIT +
       '&access_token=' +
       encodeURIComponent(token)
@@ -7920,7 +7953,8 @@ function collectThreadsReplies_(spreadsheet, snapshot, collectedAt) {
 function resolveInstagramPage_(userToken) {
   const res = fetchInsightsJson_(
     META_GRAPH_BASE +
-      'me/accounts?fields=id,access_token,instagram_business_account{id}' +
+      'me/accounts?' +
+      graphFieldsParam_('id,access_token,instagram_business_account{id}') +
       '&limit=50&access_token=' +
       encodeURIComponent(userToken)
   );
@@ -8017,7 +8051,8 @@ function fetchInstagramConversationMessages_(conversationId, pageId, pageToken) 
   const res = fetchInsightsJson_(
     META_GRAPH_BASE +
       conversationId +
-      '/messages?fields=id,created_time,from{id,username,name},message' +
+      '/messages?' +
+      graphFieldsParam_('id,created_time,from{id,username,name},message') +
       '&limit=' +
       SNS_DM_MESSAGE_LIMIT +
       '&access_token=' +

@@ -311,7 +311,9 @@ describe('Post comments / replies collection and RSS', () => {
       seedTab('media', Code.SNS_HISTORY_MEDIA_COLUMNS, [mediaRow(2, T0)]);
       fetchHandler = (url) => {
         expect(url).toContain('/m1/comments');
-        expect(url).toContain('replies{');
+        expect(url).toContain('replies%7B');
+        expect(url).not.toContain('{');
+        expect(url).not.toContain('}');
         return res(200, {
           data: [
             {
