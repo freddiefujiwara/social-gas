@@ -8094,6 +8094,273 @@ function perfDeltaSuffix_(value, base) {
   return '(' + delta + ')';
 }
 
+// A signed delta for prose: +18 / -3 / ±0.
+function perfSignedText_(delta) {
+  if (typeof delta !== 'number' || !isFinite(delta)) {
+    return '';
+  }
+  if (delta > 0) {
+    return '+' + perfFormatInt_(delta);
+  }
+  if (delta < 0) {
+    return '-' + perfFormatInt_(-delta);
+  }
+  return '±0';
+}
+
+// The first line of a caption or post text, truncated so a
+// section line stays readable.
+function perfFirstLine_(text, maxChars) {
+  const first = String(text == null ? '' : text).split('\n')[0].trim();
+  const limit = maxChars || 30;
+  return first.length > limit ? first.slice(0, limit) + '…' : first;
+}
+
+// Posts whose posted_at (or published_at) falls inside
+// [fromMs, toMs).
+function perfPostsInWindow_(rows, fromMs, toMs) {
+  return (rows || []).filter((row) => {
+    const ms = Date.parse(row && (row.posted_at || row.published_at));
+    return isFinite(ms) && ms >= fromMs && ms < toMs;
+  });
+}
+
+function perfByViewsDesc_(rows) {
+  return rows
+    .slice()
+    .sort(
+      (a, b) =>
+        (snsNumberOrNull_(b.views) || 0) - (snsNumberOrNull_(a.views) || 0)
+    );
+}
+
+// Per-channel sections for "yesterday": the last completed
+// JST day relative to the slot. Each section carries the
+// follower movement, the day's posts and the signals that
+// feed the next action — the best save rate on Instagram,
+// the most-viewed post on Threads and X, the X credit burn.
+// A channel with nothing known at all is skipped.
+function perfChannelSections_(slot, data) {
+  const endMs = Date.parse(slot.dateKey + 'T00:00:00+09:00');
+  const startMs = endMs - SNS_DAY_MS;
+  const dateKey = jstDateKey_(startMs);
+  const dateParts = dateKey.split('-');
+  const label =
+    '昨日（' + Number(dateParts[1]) + '月' + Number(dateParts[2]) + '日）';
+  const endSnap = perfSnapshotAt_(data.accountRows, endMs);
+  const startSnap = perfSnapshotAt_(data.accountRows, startMs);
+  const followerDelta = (pick) => {
+    if (!endSnap || !startSnap) {
+      return '';
+    }
+    const after = pick(endSnap);
+    const before = pick(startSnap);
+    if (typeof after !== 'number' || typeof before !== 'number') {
+      return '';
+    }
+    return perfSignedText_(after - before);
+  };
+  const sections = [];
+  const addSection = (name, lines) => {
+    if (lines.length) {
+      sections.push('【' + name + ' ' + label + '】');
+      lines.forEach((line) => sections.push(line));
+    }
+  };
+
+  // Instagram.
+  const igLines = [];
+  const igDelta = followerDelta((snap) => snap.ig);
+  if (igDelta) {
+    let line = 'フォロワー ' + igDelta;
+    const dailyRow = (data.dailyRows || []).find(
+      (row) => snsHistoryKeyCell_(row && row.date) === dateKey
+    );
+    const follows = dailyRow ? snsNumberOrNull_(dailyRow.follows) : null;
+    const unfollows = dailyRow ? snsNumberOrNull_(dailyRow.unfollows) : null;
+    if (typeof follows === 'number' && typeof unfollows === 'number') {
+      line +=
+        '（フォロー ' +
+        perfFormatInt_(follows) +
+        ' / 解除 ' +
+        perfFormatInt_(unfollows) +
+        '）';
+    }
+    igLines.push(line);
+  }
+  const igPosts = perfByViewsDesc_(
+    perfPostsInWindow_(data.mediaRows, startMs, endMs)
+  );
+  if (igPosts.length) {
+    igLines.push('投稿 ' + igPosts.length + '件（再生順）');
+    igPosts.slice(0, 3).forEach((row) => {
+      let line =
+        '・' +
+        perfFirstLine_(row.caption, 30) +
+        ': 再生' +
+        perfFormatInt_(snsNumberOrNull_(row.views) || 0) +
+        '回';
+      const saves = snsNumberOrNull_(row.saves);
+      if (typeof saves === 'number') {
+        line += ' / 保存' + perfFormatInt_(saves);
+      }
+      const shares = snsNumberOrNull_(row.shares);
+      if (typeof shares === 'number') {
+        line += ' / シェア' + perfFormatInt_(shares);
+      }
+      const avg = snsNumberOrNull_(row.avg_watch_sec);
+      const dur = snsNumberOrNull_(row.duration_sec);
+      if (typeof avg === 'number' && typeof dur === 'number' && dur > 0) {
+        line += ' / 視聴率' + Math.round((avg / dur) * 100) + '%';
+      }
+      igLines.push(line);
+    });
+    let best = null;
+    igPosts.forEach((row) => {
+      const views = snsNumberOrNull_(row.views);
+      const saves = snsNumberOrNull_(row.saves);
+      if (typeof views === 'number' && views > 0 && typeof saves === 'number') {
+        const rate = saves / views;
+        if (!best || rate > best.rate) {
+          best = { rate, row };
+        }
+      }
+    });
+    if (best) {
+      igLines.push(
+        '保存率トップ: ' +
+          perfFirstLine_(best.row.caption, 30) +
+          '（' +
+          (best.rate * 100).toFixed(1) +
+          '%）'
+      );
+    }
+  } else if (igLines.length) {
+    igLines.push('投稿なし');
+  }
+  addSection('Instagram', igLines);
+
+  // Threads.
+  const thLines = [];
+  const thDelta = followerDelta((snap) => snap.threads);
+  if (thDelta) {
+    thLines.push('フォロワー ' + thDelta);
+  }
+  const thPosts = perfByViewsDesc_(
+    perfPostsInWindow_(data.threadsMediaRows, startMs, endMs)
+  );
+  if (thPosts.length) {
+    const top = thPosts[0];
+    thLines.push(
+      '投稿 ' +
+        thPosts.length +
+        '件 / 最多表示: ' +
+        perfFirstLine_(top.text, 30) +
+        '（表示' +
+        perfFormatInt_(snsNumberOrNull_(top.views) || 0) +
+        '回・返信' +
+        perfFormatInt_(snsNumberOrNull_(top.replies) || 0) +
+        '）'
+    );
+  } else if (thLines.length) {
+    thLines.push('投稿なし');
+  }
+  addSection('Threads', thLines);
+
+  // YouTube.
+  const ytLines = [];
+  const ytDelta = followerDelta((snap) => snap.youtube);
+  if (ytDelta) {
+    ytLines.push('登録者 ' + ytDelta);
+  }
+  const ytPosts = perfPostsInWindow_(data.youtubeMediaRows, startMs, endMs);
+  if (ytPosts.length) {
+    ytPosts.forEach((row) => {
+      ytLines.push(
+        '新規動画: ' +
+          perfFirstLine_(row.title, 40) +
+          '（再生' +
+          perfFormatInt_(snsNumberOrNull_(row.views) || 0) +
+          '回）'
+      );
+    });
+  } else if (ytLines.length) {
+    ytLines.push('新規動画なし');
+  }
+  addSection('YouTube', ytLines);
+
+  // X.
+  const xLines = [];
+  const xDelta = followerDelta((snap) => snap.x);
+  if (xDelta) {
+    xLines.push('フォロワー ' + xDelta);
+  }
+  const xPosts = perfByViewsDesc_(
+    perfPostsInWindow_(data.xMediaRows, startMs, endMs)
+  );
+  if (xPosts.length) {
+    const top = xPosts[0];
+    xLines.push(
+      'ポスト ' +
+        xPosts.length +
+        '件 / 最多表示: ' +
+        perfFirstLine_(top.text, 30) +
+        '（表示' +
+        perfFormatInt_(snsNumberOrNull_(top.views) || 0) +
+        '回）'
+    );
+  } else if (xLines.length) {
+    xLines.push('ポストなし');
+  }
+  if (
+    endSnap &&
+    startSnap &&
+    typeof endSnap.balance === 'number' &&
+    typeof startSnap.balance === 'number'
+  ) {
+    const spent = startSnap.balance - endSnap.balance;
+    if (spent > 0) {
+      xLines.push(
+        'クレジット消費: $' +
+          spent.toFixed(2) +
+          '（残高 $' +
+          endSnap.balance.toFixed(2) +
+          '）'
+      );
+    }
+  }
+  addSection('X', xLines);
+
+  // Blog: yesterday's views against the day before.
+  const blogLines = [];
+  const dayBeforeKey = jstDateKey_(startMs - SNS_DAY_MS);
+  let yesterdayViews = null;
+  let dayBeforeViews = null;
+  (data.blogDailyRows || []).forEach((row) => {
+    const key = snsHistoryKeyCell_(row && row.date);
+    const views = snsNumberOrNull_(row && row.views);
+    if (key === dateKey) {
+      yesterdayViews = views;
+    }
+    if (key === dayBeforeKey) {
+      dayBeforeViews = views;
+    }
+  });
+  if (typeof yesterdayViews === 'number') {
+    let line = '表示 ' + perfFormatInt_(yesterdayViews) + '回';
+    if (typeof dayBeforeViews === 'number') {
+      line +=
+        '（前日比 ' +
+        perfSignedText_(yesterdayViews - dayBeforeViews) +
+        '）';
+    }
+    blogLines.push(line);
+  }
+  addSection('ブログ', blogLines);
+
+  return sections;
+}
+
 // One highlight item for a slot, or null when no account
 // snapshot predates it. prevSlot is the chronologically
 // previous slot (the next entry of perfRssSlots_): it anchors
@@ -8194,6 +8461,11 @@ function buildPerfHighlightItem_(slot, prevSlot, data) {
       }
     );
   }
+  const sections = perfChannelSections_(slot, data);
+  if (sections.length) {
+    lines.push('');
+    sections.forEach((line) => lines.push(line));
+  }
   let summary = '';
   segments.forEach((segment) => {
     const next = summary ? summary + ' / ' + segment : segment;
@@ -8286,6 +8558,30 @@ function servePerfRss_(parameter) {
             spreadsheet,
             'media',
             SNS_HISTORY_MEDIA_COLUMNS
+          ) || [],
+        dailyRows:
+          readHistoryTabObjects_(
+            spreadsheet,
+            'daily',
+            SNS_HISTORY_DAILY_COLUMNS
+          ) || [],
+        threadsMediaRows:
+          readHistoryTabObjects_(
+            spreadsheet,
+            'threads_media',
+            SNS_HISTORY_THREADS_MEDIA_COLUMNS
+          ) || [],
+        youtubeMediaRows:
+          readHistoryTabObjects_(
+            spreadsheet,
+            'youtube_media',
+            SNS_HISTORY_YOUTUBE_MEDIA_COLUMNS
+          ) || [],
+        xMediaRows:
+          readHistoryTabObjects_(
+            spreadsheet,
+            'x_media',
+            SNS_HISTORY_X_MEDIA_COLUMNS
           ) || [],
       };
       // One extra slot: the oldest item still needs its
