@@ -7350,10 +7350,12 @@ function htmlOut_(html) {
 // degrades to per-source errors without them): IG needs
 // instagram_manage_comments on the Meta token, Threads needs
 // threads_read_replies (see the THREADS_OAUTH_SCOPES change).
-// A post's first-ever detail fetch keeps only the comments that
-// arrived after the previous collection observed the post, so
-// enabling the feature does not flood the feed with the comments
-// that were already there.
+// A post's first-ever detail fetch reaches back only a fixed
+// grace window before the previous collection observed the
+// post, so enabling the feature does not flood the feed with
+// the comments that were already there — while a comment the
+// platform's counts were slow to reflect is not lost either
+// (see SNS_COMMENTS_BOUNDARY_GRACE_MS).
 
 const COMMENTS_RSS_TOKEN_PROPERTY = 'COMMENTS_RSS_TOKEN';
 const SNS_IG_COMMENTS_TAB = 'ig_comments';
@@ -7384,6 +7386,16 @@ const SNS_HISTORY_THREADS_REPLIES_COLUMNS = [
 // Stored comments older than this are pruned during collection;
 // it matches the retention /reader applies to its local store.
 const SNS_COMMENTS_RETENTION_DAYS = 60;
+// How far back a post's first-ever detail fetch reaches: the
+// previous observation moment minus this grace. The stored
+// comment count only reflects a new comment once the
+// platform's numbers catch up, which can trail the comment
+// itself by a collection or more; the unshifted moment would
+// sit after such a comment and drop it for good — the count
+// stops growing afterwards, so no later fetch ever retries
+// it. (This race is why the feed stayed empty after launch:
+// growth was consistently detected one collection too late.)
+const SNS_COMMENTS_BOUNDARY_GRACE_MS = 2 * SNS_DAY_MS;
 // Items per RSS response (the newest ones win).
 const SNS_COMMENTS_RSS_LIMIT = 50;
 // Comments requested per detail fetch. The APIs return newest
@@ -7508,6 +7520,19 @@ function filterCommentsAfter_(comments, boundaryIso) {
     const at = Date.parse((comment && comment.posted_at) || '');
     return Number.isFinite(at) && at > since;
   });
+}
+
+// The first-fetch boundary for a post with no stored
+// comments: the previous observation moment shifted back by
+// SNS_COMMENTS_BOUNDARY_GRACE_MS. An unreadable moment stays
+// unreadable, so filterCommentsAfter_ keeps nothing
+// (baselining silently beats importing blindly).
+function firstFetchBoundary_(prevCollectedAtIso) {
+  const at = Date.parse(prevCollectedAtIso || '');
+  if (!Number.isFinite(at)) {
+    return '';
+  }
+  return new Date(at - SNS_COMMENTS_BOUNDARY_GRACE_MS).toISOString();
 }
 
 // One IG comments page (newest first) flattened to plain comment
@@ -7715,7 +7740,7 @@ function collectInstagramComments_(spreadsheet, snapshot, collectedAt) {
     const boundary =
       target.id in storedBoundaryByMedia
         ? storedBoundaryByMedia[target.id]
-        : target.prevCollectedAt;
+        : firstFetchBoundary_(target.prevCollectedAt);
     const feedable = filterCommentsAfter_(fetched.comments, boundary);
     feedable.forEach((comment) => {
       newRows.push([
@@ -7807,7 +7832,7 @@ function collectThreadsReplies_(spreadsheet, snapshot, collectedAt) {
     const boundary =
       target.id in storedBoundaryByPost
         ? storedBoundaryByPost[target.id]
-        : target.prevCollectedAt;
+        : firstFetchBoundary_(target.prevCollectedAt);
     const feedable = filterCommentsAfter_(fetched.replies, boundary);
     feedable.forEach((reply) => {
       newRows.push([
@@ -9236,6 +9261,7 @@ if (typeof exports !== 'undefined') {
   exports.previousCountsById_ = previousCountsById_;
   exports.planCommentTargets_ = planCommentTargets_;
   exports.filterCommentsAfter_ = filterCommentsAfter_;
+  exports.firstFetchBoundary_ = firstFetchBoundary_;
   exports.oldestStoredCommentByPost_ = oldestStoredCommentByPost_;
   exports.parseInstagramComments_ = parseInstagramComments_;
   exports.fetchInstagramComments_ = fetchInstagramComments_;

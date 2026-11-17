@@ -307,13 +307,20 @@ describe('Post comments / replies collection and RSS', () => {
       store.SNS_HISTORY_SHEET_ID = 'history-sheet-id';
     });
 
-    it('stores only the comments that arrived after the previous observation on the first fetch', () => {
+    it('reaches back over the grace window on the first fetch, but no further', () => {
       seedTab('media', Code.SNS_HISTORY_MEDIA_COLUMNS, [mediaRow(2, T0)]);
       fetchHandler = (url) => {
         expect(url).toContain('/m1/comments');
         expect(url).toContain('replies{');
         return res(200, {
           data: [
+            {
+              id: 'c-ancient',
+              text: 'ずっと前のコメント',
+              username: 'erin',
+              timestamp: '2026-11-10T00:00:00+0000',
+              like_count: 0,
+            },
             {
               id: 'c-old',
               text: '前からあるコメント',
@@ -347,14 +354,14 @@ describe('Post comments / replies collection and RSS', () => {
         snapshot(3),
         T1
       );
-      expect(result).toEqual({ stored: 2, error: null });
+      expect(result).toEqual({ stored: 3, error: null });
       const tab = sheets.ig_comments;
       expect(tab.rows[0]).toEqual(Code.SNS_HISTORY_IG_COMMENTS_COLUMNS);
       const byId = {};
       tab.rows.slice(1).forEach((row) => {
         byId[row[0]] = row;
       });
-      expect(Object.keys(byId).sort()).toEqual(['c-new', 'r-new']);
+      expect(Object.keys(byId).sort()).toEqual(['c-new', 'c-old', 'r-new']);
       expect(byId['c-new']).toEqual([
         'c-new',
         'm1',
@@ -367,6 +374,34 @@ describe('Post comments / replies collection and RSS', () => {
         T1,
       ]);
       expect(byId['r-new'][2]).toBe('c-old');
+    });
+
+    it('keeps a comment the counts reflected one collection late', () => {
+      // The regression this fixes: the comment landed just
+      // after a collection (00:05), but the stored count only
+      // grew at the collection after next — by then the
+      // previous observation moment (01:00) sat after the
+      // comment, and the unshifted boundary dropped it.
+      seedTab('media', Code.SNS_HISTORY_MEDIA_COLUMNS, [mediaRow(2, T1)]);
+      fetchHandler = () =>
+        res(200, {
+          data: [
+            {
+              id: 'c-late',
+              text: '反映が遅れたコメント',
+              username: 'frank',
+              timestamp: '2026-11-16T00:05:00+0000',
+              like_count: 0,
+            },
+          ],
+        });
+      const result = Code.collectInstagramComments_(
+        spreadsheet,
+        snapshot(3),
+        '2026-11-16T02:00:00.000Z'
+      );
+      expect(result).toEqual({ stored: 1, error: null });
+      expect(sheets.ig_comments.rows[1][0]).toBe('c-late');
     });
 
     it('does not re-import older comments on later fetches (boundary moves to the oldest stored)', () => {
@@ -471,7 +506,7 @@ describe('Post comments / replies collection and RSS', () => {
       store.SNS_HISTORY_SHEET_ID = 'history-sheet-id';
     });
 
-    it('stores new replies, excluding the owner\u2019s own and pre-baseline ones', () => {
+    it('stores new replies over the grace window, excluding the owner’s own and ancient ones', () => {
       seedTab('threads_media', Code.SNS_HISTORY_THREADS_MEDIA_COLUMNS, [
         postRow(1, T0),
       ]);
@@ -479,6 +514,14 @@ describe('Post comments / replies collection and RSS', () => {
         expect(url).toContain('/p1/conversation');
         return res(200, {
           data: [
+            {
+              id: 'r-ancient',
+              text: 'ずっと前の返信',
+              username: 'erin',
+              timestamp: '2026-11-10T00:00:00Z',
+              permalink: 'https://www.threads.net/@erin/post/RA',
+              is_reply_owned_by_me: false,
+            },
             {
               id: 'r-old',
               text: '前からある返信',
@@ -507,9 +550,18 @@ describe('Post comments / replies collection and RSS', () => {
         });
       };
       const result = Code.collectThreadsReplies_(spreadsheet, snapshot(2), T1);
-      expect(result).toEqual({ stored: 1, error: null });
+      expect(result).toEqual({ stored: 2, error: null });
       expect(sheets.threads_replies.rows).toEqual([
         Code.SNS_HISTORY_THREADS_REPLIES_COLUMNS,
+        [
+          'r-old',
+          'p1',
+          'alice',
+          '前からある返信',
+          '2026-11-15T23:00:00Z',
+          'https://www.threads.net/@alice/post/RO',
+          T1,
+        ],
         [
           'r-new',
           'p1',
