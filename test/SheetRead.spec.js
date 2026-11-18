@@ -261,6 +261,7 @@ describe('Sheet-backed read side (stage 2)', () => {
             views: 500,
             likes: 20,
             comments: 3,
+            duration_sec: null,
             url: 'https://www.youtube.com/watch?v=vid-new',
           },
           {
@@ -270,6 +271,7 @@ describe('Sheet-backed read side (stage 2)', () => {
             views: 300,
             likes: 10,
             comments: 1,
+            duration_sec: null,
             url: 'https://www.youtube.com/watch?v=vid-old',
           },
         ],

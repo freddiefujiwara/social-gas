@@ -147,6 +147,7 @@ describe('SNS follower counts', () => {
             {
               id: 'vid1',
               statistics: { viewCount: '1000', likeCount: '50', commentCount: '4' },
+              contentDetails: { duration: 'PT3M25S' },
             },
           ],
         })),
@@ -593,6 +594,7 @@ describe('SNS follower counts', () => {
             views: 1000,
             likes: 50,
             comments: 4,
+            duration_sec: 205,
             url: 'https://www.youtube.com/watch?v=vid1',
           },
         ],
@@ -978,7 +980,7 @@ describe('SNS follower counts', () => {
           'vid1',
           '2026-11-08T00:00:00Z',
           '川口の歌',
-          500, 20, 3,
+          500, 20, 3, '',
         ],
       ]);
       expect(
@@ -1189,6 +1191,7 @@ describe('SNS follower counts', () => {
         1000,
         50,
         4,
+        205,
       ]);
       // The demographics tab lands keyed by breakdown segment;
       // the mocked breakdowns give two age/gender segments, two
@@ -4555,6 +4558,7 @@ describe('SNS follower counts', () => {
             views: 1000,
             likes: 50,
             comments: 4,
+            duration_sec: 205,
             url: 'https://www.youtube.com/watch?v=vid1',
           },
         ],
@@ -4564,9 +4568,10 @@ describe('SNS follower counts', () => {
         playlistId: 'UUuploads',
         maxResults: 10,
       });
-      expect(global.YouTube.Videos.list).toHaveBeenCalledWith('statistics', {
-        id: 'vid1',
-      });
+      expect(global.YouTube.Videos.list).toHaveBeenCalledWith(
+        'statistics,contentDetails',
+        { id: 'vid1' }
+      );
     });
 
     it('records the error and keeps nulls when the API throws', () => {

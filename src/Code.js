@@ -4575,6 +4575,25 @@ function fetchYouTubeChannelDetail_() {
   return result;
 }
 
+// An ISO 8601 duration (PT#H#M#S) as whole seconds. Null when
+// the value is missing or not in that shape — and for a zero
+// length, which the API reports for live and upcoming videos
+// rather than a real duration.
+function parseYouTubeDurationSec_(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const match = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$/.exec(value);
+  if (!match) {
+    return null;
+  }
+  const sec =
+    Number(match[1] || 0) * 3600 +
+    Number(match[2] || 0) * 60 +
+    Number(match[3] || 0);
+  return sec > 0 ? Math.round(sec) : null;
+}
+
 // Newest uploads (up to SNS_RECENT_VIDEO_LIMIT) via the channel's
 // uploads playlist, with per-video view/like/comment counts.
 function fetchYouTubeRecentVideos_() {
@@ -4609,17 +4628,20 @@ function fetchYouTubeRecentVideos_() {
     if (!metas.length) {
       return { videos: [], error: null };
     }
-    const statsRes = YouTube.Videos.list('statistics', {
+    const statsRes = YouTube.Videos.list('statistics,contentDetails', {
       id: metas.map((meta) => meta.id).join(','),
     });
     const statsById = {};
+    const detailsById = {};
     ((statsRes && statsRes.items) || []).forEach((item) => {
       if (item && item.id) {
         statsById[item.id] = item.statistics || {};
+        detailsById[item.id] = item.contentDetails || {};
       }
     });
     const videos = metas.map((meta) => {
       const stats = statsById[meta.id] || {};
+      const details = detailsById[meta.id] || {};
       return {
         id: meta.id,
         title: meta.title,
@@ -4627,6 +4649,7 @@ function fetchYouTubeRecentVideos_() {
         views: snsNumberOrNull_(Number(stats.viewCount)),
         likes: snsNumberOrNull_(Number(stats.likeCount)),
         comments: snsNumberOrNull_(Number(stats.commentCount)),
+        duration_sec: parseYouTubeDurationSec_(details.duration),
         url: 'https://www.youtube.com/watch?v=' + meta.id,
       };
     });
@@ -4755,6 +4778,7 @@ const SNS_HISTORY_YOUTUBE_MEDIA_COLUMNS = [
   'views',
   'likes',
   'comments',
+  'duration_sec',
 ];
 // "x_media" mirrors the other post tabs (collected_at first, the
 // post id as the upsert key). The post URL is not stored — it is
@@ -5074,6 +5098,7 @@ function buildSnsHistoryYouTubeMediaRows_(snapshot) {
       snsHistoryNumCell_(item.views),
       snsHistoryNumCell_(item.likes),
       snsHistoryNumCell_(item.comments),
+      snsHistoryNumCell_(item.duration_sec),
     ];
   });
 }
@@ -6827,6 +6852,7 @@ function buildSnsDetailFromSheet_(openedSpreadsheet) {
           views: num(row.views),
           likes: num(row.likes),
           comments: num(row.comments),
+          duration_sec: num(row.duration_sec),
           // The sheet does not store the watch URL (stage 1's
           // call: it is derivable), so it is rebuilt from the
           // video id here.
