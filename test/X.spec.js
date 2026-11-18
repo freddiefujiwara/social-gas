@@ -870,158 +870,200 @@ describe('X via tweet-gas (GAS-to-GAS sync)', () => {
     });
   });
 
-  describe('X reaction detail from the notify file', () => {
-    const NOTIFY_URL = 'https://example.com/x.freddie.notify.json';
+  describe('X reaction detail from the notify RSS', () => {
+    const NOTIFY_URL = 'https://example.com/x.freddie.notify.xml';
     const COLLECTED = '2026-11-19T01:00:00.000Z';
 
-    const likeNotification = {
-      id: 'notification-1',
-      kind: 'like',
-      unread: false,
-      actors: [
-        { id: '11', name: 'Alice', username: 'alice' },
-        { id: '12', name: 'Bob', username: 'bob' },
-      ],
-      tweet: {
-        id: '3001',
-        text: '自分の投稿',
-        createdAt: 'Wed Nov 18 12:51:28 +0000 2026',
-        author: { id: '99', name: '本人', username: 'freddiefujiwara' },
-      },
-      tweetId: '3001',
-      message: 'Alice and Bob liked your post',
-    };
+    // Modeled on the live feed: CDATA title / description,
+    // the xn extension elements, an aggregated like naming
+    // two actors, a reply (its tweet-id is the reply's own),
+    // a follow (no tweet-id), and a system notice.
+    const FEED_XML = [
+      '<?xml version="1.0" encoding="UTF-8" ?>',
+      '<rss version="2.0" xmlns:xn="https://freddiefujiwara.com/ns/x-notify">',
+      '<channel>',
+      '<item>',
+      '  <title><![CDATA[Alice (@alice) - like]]></title>',
+      '  <link>https://twitter.com/freddiefujiwara/status/3001</link>',
+      '  <description><![CDATA[自分の投稿]]></description>',
+      '  <pubDate>Wed, 18 Nov 2026 12:51:28 +0000</pubDate>',
+      '  <guid isPermaLink="false">x-notify-like-alice-3001</guid>',
+      '  <xn:kind>like</xn:kind>',
+      '  <xn:actor username="alice">Alice</xn:actor>',
+      '  <xn:actor username="bob">Bob</xn:actor>',
+      '  <xn:tweet-id>3001</xn:tweet-id>',
+      '  <xn:message>Alice and Bob liked your post</xn:message>',
+      '</item>',
+      '<item>',
+      '  <title><![CDATA[Carol (@carol) - reply]]></title>',
+      '  <link>https://twitter.com/carol/status/4001</link>',
+      '  <description><![CDATA[@freddiefujiwara 返信の本文です]]></description>',
+      '  <pubDate>Sat, 17 Oct 2026 04:35:06 +0000</pubDate>',
+      '  <guid isPermaLink="false">x-notify-reply-carol-4001</guid>',
+      '  <xn:kind>reply</xn:kind>',
+      '  <xn:actor username="carol">Carol</xn:actor>',
+      '  <xn:tweet-id>4001</xn:tweet-id>',
+      '  <xn:message></xn:message>',
+      '</item>',
+      '<item>',
+      '  <title><![CDATA[Dave (@dave) - follow]]></title>',
+      '  <link>https://twitter.com/dave</link>',
+      '  <description><![CDATA[]]></description>',
+      '  <pubDate>Wed, 18 Nov 2026 01:00:00 +0000</pubDate>',
+      '  <guid isPermaLink="false">x-notify-follow-dave</guid>',
+      '  <xn:kind>follow</xn:kind>',
+      '  <xn:actor username="dave">Dave</xn:actor>',
+      '  <xn:message>Dave followed you</xn:message>',
+      '</item>',
+      '<item>',
+      '  <title><![CDATA[System - unknown]]></title>',
+      '  <link>https://twitter.com/</link>',
+      '  <description><![CDATA[Your blue checkmark is here!]]></description>',
+      '  <pubDate>Wed, 18 Nov 2026 01:00:00 +0000</pubDate>',
+      '  <guid isPermaLink="false">x-notify-unknown-freddiefujiwara</guid>',
+      '  <xn:kind>unknown</xn:kind>',
+      '  <xn:message>Your blue checkmark is here!</xn:message>',
+      '</item>',
+      '</channel>',
+      '</rss>',
+    ].join('\n');
 
-    const replyNotification = {
-      id: 'notification-2',
-      kind: 'reply',
-      unread: false,
-      actors: [{ id: '13', name: 'Carol', username: 'carol' }],
-      tweet: {
-        id: '4001',
-        text: '@freddiefujiwara 返信の本文です',
-        createdAt: 'Sat Oct 17 04:35:06 +0000 2026',
-        author: { id: '13', name: 'Carol', username: 'carol' },
-        isReply: true,
-        inReplyToTweetId: '3001',
-      },
-      tweetId: '4001',
-    };
-
-    describe('buildXReactionRows_', () => {
-      it('expands an aggregated like into one fact per named actor', () => {
-        const rows = Code.buildXReactionRows_([likeNotification], COLLECTED);
-        expect(rows).toEqual([
-          [
-            'like|3001|alice',
-            'like',
-            '3001',
-            'Alice',
-            'alice',
-            '',
-            '',
-            '',
-            COLLECTED,
-          ],
-          ['like|3001|bob', 'like', '3001', 'Bob', 'bob', '', '', '', COLLECTED],
-        ]);
-      });
-
-      it('collapses repeated keys inside one file', () => {
-        const rows = Code.buildXReactionRows_(
-          [likeNotification, likeNotification],
-          COLLECTED
-        );
-        expect(rows).toHaveLength(2);
-      });
-
-      it('keys a reply by its own tweet id and targets the post it answers', () => {
-        const rows = Code.buildXReactionRows_([replyNotification], COLLECTED);
-        expect(rows).toEqual([
-          [
-            'reply|4001',
-            'reply',
-            '3001',
-            'Carol',
-            'carol',
-            '@freddiefujiwara 返信の本文です',
-            '4001',
-            '2026-10-17T04:35:06.000Z',
-            COLLECTED,
-          ],
-        ]);
-      });
-
-      it('skips a quote that carries no pointer to the quoted post', () => {
-        const quote = {
-          kind: 'quote',
-          actors: [{ id: '13', name: 'Carol', username: 'carol' }],
-          tweet: {
-            id: '4002',
-            text: '引用の本文',
-            createdAt: 'Sat Oct 17 04:35:06 +0000 2026',
-            author: { id: '13', name: 'Carol', username: 'carol' },
-          },
-          tweetId: '4002',
-        };
-        expect(Code.buildXReactionRows_([quote], COLLECTED)).toEqual([]);
-      });
-
-      it('stores follows as account-level facts with no post', () => {
-        const follow = {
-          kind: 'follow',
-          actors: [{ id: '14', name: 'Dave', username: 'dave' }],
-          message: 'Dave followed you',
-        };
-        expect(Code.buildXReactionRows_([follow], COLLECTED)).toEqual([
-          ['follow||dave', 'follow', '', 'Dave', 'dave', '', '', '', COLLECTED],
-        ]);
-      });
-
-      it('ignores unknown kinds and unattributable notifications', () => {
-        const unknown = {
-          kind: 'unknown',
-          actors: [{ id: '99', name: '本人', username: 'freddiefujiwara' }],
-          message: 'Your blue checkmark is here!',
-        };
-        const orphanLike = { kind: 'like', actors: likeNotification.actors };
-        const idOnlyActor = {
+    describe('parseXNotifyFeed_', () => {
+      it('reads kind, every actor, tweet-id, body and pubDate per item', () => {
+        const items = Code.parseXNotifyFeed_(FEED_XML);
+        expect(items).toHaveLength(4);
+        expect(items[0]).toEqual({
+          guid: 'x-notify-like-alice-3001',
           kind: 'like',
+          actors: [
+            { name: 'Alice', username: 'alice' },
+            { name: 'Bob', username: 'bob' },
+          ],
           tweetId: '3001',
-          actors: [{ id: '42', name: 'NoName' }],
-        };
-        const rows = Code.buildXReactionRows_(
-          [unknown, orphanLike, idOnlyActor],
-          COLLECTED
-        );
-        expect(rows).toEqual([
-          ['like|3001|42', 'like', '3001', 'NoName', '42', '', '', '', COLLECTED],
+          text: '自分の投稿',
+          actedAt: '2026-11-18T12:51:28.000Z',
+        });
+        expect(items[1].kind).toBe('reply');
+        expect(items[1].tweetId).toBe('4001');
+        expect(items[1].text).toBe('@freddiefujiwara 返信の本文です');
+        expect(items[1].actedAt).toBe('2026-10-17T04:35:06.000Z');
+        expect(items[2].kind).toBe('follow');
+        expect(items[2].tweetId).toBe('');
+      });
+
+      it('falls back to the guid and title when the extensions are absent', () => {
+        const bare = FEED_XML.replace(/ *<xn:.*\n/g, '');
+        const items = Code.parseXNotifyFeed_(bare);
+        expect(items[0].kind).toBe('like');
+        expect(items[0].tweetId).toBe('3001');
+        expect(items[0].actors).toEqual([
+          { name: 'Alice', username: 'alice' },
         ]);
+        expect(items[2].kind).toBe('follow');
+        expect(items[2].actors).toEqual([{ name: 'Dave', username: 'dave' }]);
+      });
+
+      it('decodes entities in non-CDATA bodies', () => {
+        const xml =
+          '<rss><channel><item>' +
+          '<title>Fish &amp; Chips (@fish) - like</title>' +
+          '<description>1 &lt; 2 &amp; 3</description>' +
+          '<pubDate>Wed, 18 Nov 2026 12:51:28 +0000</pubDate>' +
+          '<guid>x-notify-like-fish-3001</guid>' +
+          '<xn:kind>like</xn:kind>' +
+          '<xn:actor username="fish">Fish &amp; Chips</xn:actor>' +
+          '<xn:tweet-id>3001</xn:tweet-id>' +
+          '</item></channel></rss>';
+        const items = Code.parseXNotifyFeed_(xml);
+        expect(items[0].text).toBe('1 < 2 & 3');
+        expect(items[0].actors[0].name).toBe('Fish & Chips');
       });
     });
 
-    describe('fetchXNotifyFile_', () => {
+    describe('buildXReactionRows_', () => {
+      const items = () => Code.parseXNotifyFeed_(FEED_XML);
+
+      it('expands an aggregated like into one fact per named actor', () => {
+        const rows = Code.buildXReactionRows_(items(), COLLECTED);
+        expect(rows).toContainEqual([
+          'like|3001|alice',
+          'like',
+          '3001',
+          'Alice',
+          'alice',
+          '',
+          '',
+          '',
+          COLLECTED,
+        ]);
+        expect(rows).toContainEqual([
+          'like|3001|bob',
+          'like',
+          '3001',
+          'Bob',
+          'bob',
+          '',
+          '',
+          '',
+          COLLECTED,
+        ]);
+      });
+
+      it('keeps a reply unattributed, keyed by its own tweet id', () => {
+        const rows = Code.buildXReactionRows_(items(), COLLECTED);
+        expect(rows).toContainEqual([
+          'reply|4001',
+          'reply',
+          '',
+          'Carol',
+          'carol',
+          '@freddiefujiwara 返信の本文です',
+          '4001',
+          '2026-10-17T04:35:06.000Z',
+          COLLECTED,
+        ]);
+      });
+
+      it('stores follows as account-level facts and skips system notices', () => {
+        const rows = Code.buildXReactionRows_(items(), COLLECTED);
+        expect(rows).toContainEqual([
+          'follow||dave',
+          'follow',
+          '',
+          'Dave',
+          'dave',
+          '',
+          '',
+          '',
+          COLLECTED,
+        ]);
+        expect(rows).toHaveLength(4);
+      });
+
+      it('collapses repeated keys inside one feed', () => {
+        const doubled = items().concat(items());
+        expect(Code.buildXReactionRows_(doubled, COLLECTED)).toHaveLength(4);
+      });
+    });
+
+    describe('fetchXNotifyFeed_', () => {
       it('does not fetch while X_NOTIFY_URL is unset', () => {
-        expect(Code.fetchXNotifyFile_()).toBeNull();
+        expect(Code.fetchXNotifyFeed_()).toBeNull();
         expect(global.UrlFetchApp.fetch).not.toHaveBeenCalled();
       });
 
-      it('returns null for a missing file, a non-JSON body and an empty array', () => {
+      it('returns null for a missing file and a body without items', () => {
         store.X_NOTIFY_URL = NOTIFY_URL;
         fetchHandler = () => res(404, 'not found');
-        expect(Code.fetchXNotifyFile_()).toBeNull();
-        fetchHandler = () => res(200, 'not json');
-        expect(Code.fetchXNotifyFile_()).toBeNull();
-        fetchHandler = () => res(200, []);
-        expect(Code.fetchXNotifyFile_()).toBeNull();
-        fetchHandler = () => res(200, { notifications: [] });
-        expect(Code.fetchXNotifyFile_()).toBeNull();
+        expect(Code.fetchXNotifyFeed_()).toBeNull();
+        fetchHandler = () => res(200, '<html>not a feed</html>');
+        expect(Code.fetchXNotifyFeed_()).toBeNull();
       });
 
-      it('returns the notifications array of a healthy file', () => {
+      it('returns the raw XML of a healthy feed', () => {
         store.X_NOTIFY_URL = NOTIFY_URL;
-        fetchHandler = () => res(200, [likeNotification]);
-        expect(Code.fetchXNotifyFile_()).toEqual([likeNotification]);
+        fetchHandler = () => res(200, FEED_XML);
+        expect(Code.fetchXNotifyFeed_()).toBe(FEED_XML);
       });
     });
 
@@ -1029,24 +1071,23 @@ describe('X via tweet-gas (GAS-to-GAS sync)', () => {
       it('stores new facts once and dedupes the next scan of the same window', () => {
         serveTabs({});
         store.X_NOTIFY_URL = NOTIFY_URL;
-        fetchHandler = () =>
-          res(200, [likeNotification, replyNotification]);
+        fetchHandler = () => res(200, FEED_XML);
         const first = Code.collectXReactions_(spreadsheet, COLLECTED);
-        expect(first.stored).toBe(3);
+        expect(first.stored).toBe(4);
         expect(first.error).toBeNull();
         expect(sheets.x_reactions.rows[0]).toEqual(
           Code.SNS_HISTORY_X_REACTIONS_COLUMNS
         );
-        expect(sheets.x_reactions.rows).toHaveLength(4);
+        expect(sheets.x_reactions.rows).toHaveLength(5);
         const second = Code.collectXReactions_(
           spreadsheet,
           '2026-11-19T02:00:00.000Z'
         );
         expect(second.stored).toBe(0);
-        expect(sheets.x_reactions.rows).toHaveLength(4);
+        expect(sheets.x_reactions.rows).toHaveLength(5);
       });
 
-      it('leaves the tab untouched while the file cannot be fetched', () => {
+      it('leaves the tab untouched while the feed cannot be fetched', () => {
         serveTabs({});
         store.X_NOTIFY_URL = NOTIFY_URL;
         fetchHandler = () => res(404, 'not found');
@@ -1071,7 +1112,7 @@ describe('X via tweet-gas (GAS-to-GAS sync)', () => {
           x_reactions: [Code.SNS_HISTORY_X_REACTIONS_COLUMNS, oldRow],
         });
         store.X_NOTIFY_URL = NOTIFY_URL;
-        fetchHandler = () => res(200, [likeNotification]);
+        fetchHandler = () => res(200, FEED_XML);
         vi.useFakeTimers();
         vi.setSystemTime(new Date('2026-11-19T00:00:00.000Z'));
         try {
@@ -1094,7 +1135,7 @@ describe('X via tweet-gas (GAS-to-GAS sync)', () => {
         return row;
       };
 
-      it('groups stored reactions under their post and lists recent follows', () => {
+      it('groups likes under their post, replies stay unattributed, follows list newest first', () => {
         serveTabs({
           account: [
             Code.SNS_HISTORY_ACCOUNT_COLUMNS,
@@ -1132,7 +1173,7 @@ describe('X via tweet-gas (GAS-to-GAS sync)', () => {
             [
               'reply|4001',
               'reply',
-              '3001',
+              '',
               'Carol',
               'carol',
               '返信の本文です',
@@ -1177,11 +1218,11 @@ describe('X via tweet-gas (GAS-to-GAS sync)', () => {
         });
         const detail = Code.buildSnsDetailFromSheet_();
         expect(Object.keys(detail.x.reactions)).toEqual(['3001']);
-        expect(detail.x.reactions['3001'].map((entry) => entry.kind)).toEqual([
-          'like',
-          'reply',
-        ]);
-        expect(detail.x.reactions['3001'][1].text).toBe('返信の本文です');
+        expect(detail.x.reactions['3001']).toHaveLength(1);
+        expect(detail.x.reactions['3001'][0].actor_username).toBe('alice');
+        expect(detail.x.unattributed_reactions).toHaveLength(1);
+        expect(detail.x.unattributed_reactions[0].kind).toBe('reply');
+        expect(detail.x.unattributed_reactions[0].text).toBe('返信の本文です');
         expect(
           detail.x.recent_follows.map((entry) => entry.actor_username)
         ).toEqual(['erin', 'dave']);
@@ -1199,8 +1240,10 @@ describe('X via tweet-gas (GAS-to-GAS sync)', () => {
         });
         const detail = Code.buildSnsDetailFromSheet_();
         expect(detail.x.reactions).toBeNull();
+        expect(detail.x.unattributed_reactions).toBeNull();
         expect(detail.x.recent_follows).toBeNull();
       });
     });
   });
+
 });
