@@ -1223,15 +1223,16 @@ function parseThreadsInsightsByName_(data) {
 // the rest of the collection.
 //
 // The profile half (followers and recent posts) prefers the
-// stats file x-cli writes hourly on the home server (the
-// X_STATS_URL property points at it): the file carries the
-// same shape as the snapshot's x section, so the collection
-// stops depending on tweet-gas's per-hour profile / post reads
-// against the official API — the main credit consumer. The
-// usage half has no file equivalent (it is billing data) and
-// always comes from tweet-gas. A file that cannot be fetched,
-// is not ok, or is older than SNS_X_STATS_MAX_AGE_MS simply
-// falls back to the tweet-gas values, so the file is an
+// stats feed x-cli's hourly output is converted to on the
+// home server (the X_STATS_URL property points at the RSS):
+// the feed carries the same values as the snapshot's x
+// section, so the collection stops depending on tweet-gas's
+// per-hour profile / post reads against the official API —
+// the main credit consumer. The usage half has no feed
+// equivalent (it is billing data) and always comes from
+// tweet-gas. A feed that cannot be fetched, cannot be
+// parsed, or is older than SNS_X_STATS_MAX_AGE_MS simply
+// falls back to the tweet-gas values, so the feed is an
 // optimisation, never a new single point of failure.
 
 const SNS_X_RECENT_POSTS_LIMIT = 50;
@@ -1433,15 +1434,64 @@ function fetchXDetailFromTweetGas_() {
   return result;
 }
 
-// The profile half of the X section from the stats file x-cli
-// writes on the home server: { ok, collected_at, x: { username,
-// followers, following, recent_posts } }, the same shape as the
-// tweet-gas snapshot's x section (metrics missing on a post are
+// Parses the stats RSS x-cli's output is converted to on the
+// home server (namespace https://freddiefujiwara.com/ns/x-stats,
+// prefix xs): the channel carries xs:username / xs:followers /
+// xs:following / xs:collected-at, and each item is one post —
+// guid is the post id, pubDate its moment, description its
+// text, and xs:views / xs:likes / xs:reposts / xs:replies its
+// metrics. Returns { collected_at, username, followers,
+// recent_posts } with the posts in the wire shape
+// buildXPostEntry_ consumes, or null when the document does
+// not yield a collected_at or any post at all — a feed that
+// cannot prove when it was made is not a stats source. The
+// element reads reuse the notify feed's extractor
+// (xFeedFirstElement_), which matches on local names, so the
+// xs prefix itself is never hard-coded here.
+function parseXStatsFeed_(xmlText) {
+  const text = String(xmlText || '');
+  const head = text.split('<item')[0];
+  const collectedAt = xFeedFirstElement_(head, 'collected-at');
+  if (!collectedAt || !Number.isFinite(Date.parse(collectedAt))) {
+    return null;
+  }
+  const posts = [];
+  const pattern = /<item(?:\s[^>]*)?>([\s\S]*?)<\/item>/g;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    const itemXml = match[1];
+    posts.push({
+      id: xFeedFirstElement_(itemXml, 'guid'),
+      posted_at: xNotifyDateToIso_(xFeedFirstElement_(itemXml, 'pubDate')),
+      text: xFeedFirstElement_(itemXml, 'description') || '',
+      views: xWireNumberOrNull_(xFeedFirstElement_(itemXml, 'views')),
+      likes: xWireNumberOrNull_(xFeedFirstElement_(itemXml, 'likes')),
+      reposts: xWireNumberOrNull_(xFeedFirstElement_(itemXml, 'reposts')),
+      replies: xWireNumberOrNull_(xFeedFirstElement_(itemXml, 'replies')),
+    });
+  }
+  if (!posts.length) {
+    return null;
+  }
+  const username = xFeedFirstElement_(head, 'username');
+  return {
+    collected_at: collectedAt,
+    username: username || null,
+    followers: xWireNumberOrNull_(xFeedFirstElement_(head, 'followers')),
+    recent_posts: posts,
+  };
+}
+
+// The profile half of the X section from the stats feed x-cli's
+// output is converted to on the home server (the X_STATS_URL
+// property points at the RSS): the same values the tweet-gas
+// snapshot's x section carries (metrics missing on a post are
 // null, never 0). Never throws and never guesses: an unset
-// X_STATS_URL, a failed fetch, a not-ok body, or a collected_at
-// older than SNS_X_STATS_MAX_AGE_MS all return null, and the
-// caller falls back to the tweet-gas values. The returned posts
-// pass through the same normalization as the wire posts.
+// X_STATS_URL, a failed fetch, an unparsable body, or a
+// collected_at older than SNS_X_STATS_MAX_AGE_MS all return
+// null, and the caller falls back to the tweet-gas values. The
+// returned posts pass through the same normalization as the
+// wire posts.
 function fetchXStatsFile_() {
   const url = getScriptProperty_('X_STATS_URL');
   if (!url) {
@@ -1456,13 +1506,8 @@ function fetchXStatsFile_() {
   if (res.getResponseCode() !== 200) {
     return null;
   }
-  let data = null;
-  try {
-    data = JSON.parse(res.getContentText());
-  } catch (err) {
-    data = null;
-  }
-  if (!data || data.ok !== true || !data.x || typeof data.x !== 'object') {
+  const data = parseXStatsFeed_(res.getContentText());
+  if (!data) {
     return null;
   }
   const collectedMs = Date.parse(data.collected_at);
@@ -1472,19 +1517,14 @@ function fetchXStatsFile_() {
   ) {
     return null;
   }
-  const x = data.x;
-  const result = {
-    followers: xWireNumberOrNull_(x.followers),
-    username: x.username != null ? String(x.username) : null,
-    recent_posts: null,
-  };
-  if (Array.isArray(x.recent_posts)) {
-    result.recent_posts = x.recent_posts
+  return {
+    followers: data.followers,
+    username: data.username,
+    recent_posts: data.recent_posts
       .map(buildXPostEntry_)
       .filter((entry) => entry.id)
-      .slice(0, SNS_X_RECENT_POSTS_LIMIT);
-  }
-  return result;
+      .slice(0, SNS_X_RECENT_POSTS_LIMIT),
+  };
 }
 
 // The X section for one collection: the usage half always comes
@@ -10062,6 +10102,7 @@ if (typeof exports !== 'undefined') {
   exports.fetchXDetail_ = fetchXDetail_;
   exports.fetchXNotifyFeed_ = fetchXNotifyFeed_;
   exports.parseXNotifyFeed_ = parseXNotifyFeed_;
+  exports.parseXStatsFeed_ = parseXStatsFeed_;
   exports.xNotifyDateToIso_ = xNotifyDateToIso_;
   exports.buildXReactionRows_ = buildXReactionRows_;
   exports.collectXReactions_ = collectXReactions_;
