@@ -869,4 +869,338 @@ describe('X via tweet-gas (GAS-to-GAS sync)', () => {
       expect(response.x).toEqual({ followers: 321 });
     });
   });
+
+  describe('X reaction detail from the notify file', () => {
+    const NOTIFY_URL = 'https://example.com/x.freddie.notify.json';
+    const COLLECTED = '2026-11-19T01:00:00.000Z';
+
+    const likeNotification = {
+      id: 'notification-1',
+      kind: 'like',
+      unread: false,
+      actors: [
+        { id: '11', name: 'Alice', username: 'alice' },
+        { id: '12', name: 'Bob', username: 'bob' },
+      ],
+      tweet: {
+        id: '3001',
+        text: '自分の投稿',
+        createdAt: 'Wed Nov 18 12:51:28 +0000 2026',
+        author: { id: '99', name: '本人', username: 'freddiefujiwara' },
+      },
+      tweetId: '3001',
+      message: 'Alice and Bob liked your post',
+    };
+
+    const replyNotification = {
+      id: 'notification-2',
+      kind: 'reply',
+      unread: false,
+      actors: [{ id: '13', name: 'Carol', username: 'carol' }],
+      tweet: {
+        id: '4001',
+        text: '@freddiefujiwara 返信の本文です',
+        createdAt: 'Sat Oct 17 04:35:06 +0000 2026',
+        author: { id: '13', name: 'Carol', username: 'carol' },
+        isReply: true,
+        inReplyToTweetId: '3001',
+      },
+      tweetId: '4001',
+    };
+
+    describe('buildXReactionRows_', () => {
+      it('expands an aggregated like into one fact per named actor', () => {
+        const rows = Code.buildXReactionRows_([likeNotification], COLLECTED);
+        expect(rows).toEqual([
+          [
+            'like|3001|alice',
+            'like',
+            '3001',
+            'Alice',
+            'alice',
+            '',
+            '',
+            '',
+            COLLECTED,
+          ],
+          ['like|3001|bob', 'like', '3001', 'Bob', 'bob', '', '', '', COLLECTED],
+        ]);
+      });
+
+      it('collapses repeated keys inside one file', () => {
+        const rows = Code.buildXReactionRows_(
+          [likeNotification, likeNotification],
+          COLLECTED
+        );
+        expect(rows).toHaveLength(2);
+      });
+
+      it('keys a reply by its own tweet id and targets the post it answers', () => {
+        const rows = Code.buildXReactionRows_([replyNotification], COLLECTED);
+        expect(rows).toEqual([
+          [
+            'reply|4001',
+            'reply',
+            '3001',
+            'Carol',
+            'carol',
+            '@freddiefujiwara 返信の本文です',
+            '4001',
+            '2026-10-17T04:35:06.000Z',
+            COLLECTED,
+          ],
+        ]);
+      });
+
+      it('skips a quote that carries no pointer to the quoted post', () => {
+        const quote = {
+          kind: 'quote',
+          actors: [{ id: '13', name: 'Carol', username: 'carol' }],
+          tweet: {
+            id: '4002',
+            text: '引用の本文',
+            createdAt: 'Sat Oct 17 04:35:06 +0000 2026',
+            author: { id: '13', name: 'Carol', username: 'carol' },
+          },
+          tweetId: '4002',
+        };
+        expect(Code.buildXReactionRows_([quote], COLLECTED)).toEqual([]);
+      });
+
+      it('stores follows as account-level facts with no post', () => {
+        const follow = {
+          kind: 'follow',
+          actors: [{ id: '14', name: 'Dave', username: 'dave' }],
+          message: 'Dave followed you',
+        };
+        expect(Code.buildXReactionRows_([follow], COLLECTED)).toEqual([
+          ['follow||dave', 'follow', '', 'Dave', 'dave', '', '', '', COLLECTED],
+        ]);
+      });
+
+      it('ignores unknown kinds and unattributable notifications', () => {
+        const unknown = {
+          kind: 'unknown',
+          actors: [{ id: '99', name: '本人', username: 'freddiefujiwara' }],
+          message: 'Your blue checkmark is here!',
+        };
+        const orphanLike = { kind: 'like', actors: likeNotification.actors };
+        const idOnlyActor = {
+          kind: 'like',
+          tweetId: '3001',
+          actors: [{ id: '42', name: 'NoName' }],
+        };
+        const rows = Code.buildXReactionRows_(
+          [unknown, orphanLike, idOnlyActor],
+          COLLECTED
+        );
+        expect(rows).toEqual([
+          ['like|3001|42', 'like', '3001', 'NoName', '42', '', '', '', COLLECTED],
+        ]);
+      });
+    });
+
+    describe('fetchXNotifyFile_', () => {
+      it('does not fetch while X_NOTIFY_URL is unset', () => {
+        expect(Code.fetchXNotifyFile_()).toBeNull();
+        expect(global.UrlFetchApp.fetch).not.toHaveBeenCalled();
+      });
+
+      it('returns null for a missing file, a non-JSON body and an empty array', () => {
+        store.X_NOTIFY_URL = NOTIFY_URL;
+        fetchHandler = () => res(404, 'not found');
+        expect(Code.fetchXNotifyFile_()).toBeNull();
+        fetchHandler = () => res(200, 'not json');
+        expect(Code.fetchXNotifyFile_()).toBeNull();
+        fetchHandler = () => res(200, []);
+        expect(Code.fetchXNotifyFile_()).toBeNull();
+        fetchHandler = () => res(200, { notifications: [] });
+        expect(Code.fetchXNotifyFile_()).toBeNull();
+      });
+
+      it('returns the notifications array of a healthy file', () => {
+        store.X_NOTIFY_URL = NOTIFY_URL;
+        fetchHandler = () => res(200, [likeNotification]);
+        expect(Code.fetchXNotifyFile_()).toEqual([likeNotification]);
+      });
+    });
+
+    describe('collectXReactions_', () => {
+      it('stores new facts once and dedupes the next scan of the same window', () => {
+        serveTabs({});
+        store.X_NOTIFY_URL = NOTIFY_URL;
+        fetchHandler = () =>
+          res(200, [likeNotification, replyNotification]);
+        const first = Code.collectXReactions_(spreadsheet, COLLECTED);
+        expect(first.stored).toBe(3);
+        expect(first.error).toBeNull();
+        expect(sheets.x_reactions.rows[0]).toEqual(
+          Code.SNS_HISTORY_X_REACTIONS_COLUMNS
+        );
+        expect(sheets.x_reactions.rows).toHaveLength(4);
+        const second = Code.collectXReactions_(
+          spreadsheet,
+          '2026-11-19T02:00:00.000Z'
+        );
+        expect(second.stored).toBe(0);
+        expect(sheets.x_reactions.rows).toHaveLength(4);
+      });
+
+      it('leaves the tab untouched while the file cannot be fetched', () => {
+        serveTabs({});
+        store.X_NOTIFY_URL = NOTIFY_URL;
+        fetchHandler = () => res(404, 'not found');
+        const result = Code.collectXReactions_(spreadsheet, COLLECTED);
+        expect(result).toEqual({ stored: 0, error: null });
+        expect(sheets.x_reactions).toBeUndefined();
+      });
+
+      it('prunes facts collected over 120 days ago', () => {
+        const oldRow = [
+          'like|1000|old',
+          'like',
+          '1000',
+          'Old',
+          'old',
+          '',
+          '',
+          '',
+          '2026-07-01T00:00:00.000Z',
+        ];
+        serveTabs({
+          x_reactions: [Code.SNS_HISTORY_X_REACTIONS_COLUMNS, oldRow],
+        });
+        store.X_NOTIFY_URL = NOTIFY_URL;
+        fetchHandler = () => res(200, [likeNotification]);
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-11-19T00:00:00.000Z'));
+        try {
+          Code.collectXReactions_(spreadsheet, COLLECTED);
+        } finally {
+          vi.useRealTimers();
+        }
+        const keys = sheets.x_reactions.rows.map((row) => row[0]);
+        expect(keys).not.toContain('like|1000|old');
+        expect(keys).toContain('like|3001|alice');
+      });
+    });
+
+    describe('sheet-backed read side', () => {
+      const accountRow = (values) => {
+        const row = Code.SNS_HISTORY_ACCOUNT_COLUMNS.map(() => '');
+        for (const [name, value] of Object.entries(values)) {
+          row[Code.SNS_HISTORY_ACCOUNT_COLUMNS.indexOf(name)] = value;
+        }
+        return row;
+      };
+
+      it('groups stored reactions under their post and lists recent follows', () => {
+        serveTabs({
+          account: [
+            Code.SNS_HISTORY_ACCOUNT_COLUMNS,
+            accountRow({
+              collected_at: '2026-11-19T00:00:00.000Z',
+              x_followers: 321,
+            }),
+          ],
+          x_media: [
+            Code.SNS_HISTORY_X_MEDIA_COLUMNS,
+            [
+              '2026-11-19T00:00:00.000Z',
+              '3001',
+              '2026-11-18T10:00:00.000Z',
+              '対象の投稿',
+              500,
+              12,
+              3,
+              2,
+            ],
+          ],
+          x_reactions: [
+            Code.SNS_HISTORY_X_REACTIONS_COLUMNS,
+            [
+              'like|3001|alice',
+              'like',
+              '3001',
+              'Alice',
+              'alice',
+              '',
+              '',
+              '',
+              '2026-11-19T00:00:00.000Z',
+            ],
+            [
+              'reply|4001',
+              'reply',
+              '3001',
+              'Carol',
+              'carol',
+              '返信の本文です',
+              '4001',
+              '2026-10-17T04:35:06.000Z',
+              '2026-11-19T00:00:00.000Z',
+            ],
+            [
+              'like|9999|mallory',
+              'like',
+              '9999',
+              'Mallory',
+              'mallory',
+              '',
+              '',
+              '',
+              '2026-11-19T00:00:00.000Z',
+            ],
+            [
+              'follow||dave',
+              'follow',
+              '',
+              'Dave',
+              'dave',
+              '',
+              '',
+              '',
+              '2026-11-18T00:00:00.000Z',
+            ],
+            [
+              'follow||erin',
+              'follow',
+              '',
+              'Erin',
+              'erin',
+              '',
+              '',
+              '',
+              '2026-11-19T00:00:00.000Z',
+            ],
+          ],
+        });
+        const detail = Code.buildSnsDetailFromSheet_();
+        expect(Object.keys(detail.x.reactions)).toEqual(['3001']);
+        expect(detail.x.reactions['3001'].map((entry) => entry.kind)).toEqual([
+          'like',
+          'reply',
+        ]);
+        expect(detail.x.reactions['3001'][1].text).toBe('返信の本文です');
+        expect(
+          detail.x.recent_follows.map((entry) => entry.actor_username)
+        ).toEqual(['erin', 'dave']);
+      });
+
+      it('leaves reactions null while the tab does not exist', () => {
+        serveTabs({
+          account: [
+            Code.SNS_HISTORY_ACCOUNT_COLUMNS,
+            accountRow({
+              collected_at: '2026-11-19T00:00:00.000Z',
+              x_followers: 321,
+            }),
+          ],
+        });
+        const detail = Code.buildSnsDetailFromSheet_();
+        expect(detail.x.reactions).toBeNull();
+        expect(detail.x.recent_follows).toBeNull();
+      });
+    });
+  });
 });
