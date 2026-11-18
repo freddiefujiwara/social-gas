@@ -738,6 +738,13 @@ function buildEmptySnsDetail_() {
       x_error: null,
       recent_posts: null,
       posts_error: null,
+      // Reaction facts per post ({ tweet_id: [fact, ...] }) and
+      // the newest stored follows, both from the "x_reactions"
+      // tab — see buildXReactionRows_. Only the sheet-built
+      // detail carries them; the snapshot fallback leaves them
+      // null and the screen simply offers no detail then.
+      reactions: null,
+      recent_follows: null,
     },
   };
 }
@@ -1503,6 +1510,332 @@ function fetchXDetail_() {
   if (stats.followers != null && stats.recent_posts) {
     result.x_error = null;
   }
+  return result;
+}
+
+// --- X reaction detail (notify file -> "x_reactions" tab) ---
+// The per-post counts say how many reactions a post got; this
+// section keeps who reacted and, for replies and quotes, what
+// they wrote. The source is the notify JSON x-cli writes hourly
+// on the home server next to the stats file (the X_NOTIFY_URL
+// property points at it): a bare array of the newest ~40
+// notifications, each { id, kind, unread, actors, tweet?,
+// tweetId?, message? } with kind one of like / retweet / reply /
+// quote / follow / unknown (anything else, blue-check notices
+// included, is ignored). The file is a rolling window, so the
+// stored rows are facts accumulated from the first collection
+// on: a reaction is stored the first time a notification
+// carrying it is seen, and nothing is ever backfilled for the
+// time before the feature started. Aggregated like
+// notifications only name the actors X chose to list, so the
+// stored likers can stay a subset of the post's like count.
+//
+// Facts land in the history spreadsheet's "x_reactions" tab,
+// one row per reaction fact, upserted by reaction_key:
+//   like / retweet: kind|tweet_id|actor_username — one row per
+//     named actor of the (possibly aggregated) notification;
+//     the target post is the notification's tweetId.
+//   reply / quote: kind|reaction_tweet_id — the notification's
+//     tweet is the reaction itself (its author, text and
+//     createdAt), and the target post is its
+//     inReplyToTweetId. A reply / quote notification without
+//     that pointer cannot be attributed and is skipped.
+//   follow: follow||actor_username — account-level, no post.
+// The file carries no per-notification timestamp, so a fact's
+// moment is the reaction tweet's createdAt for replies and
+// quotes (acted_at) and simply the first collection that saw
+// it (collected_at) for the rest. Like the stats file, the
+// notify file is an optimisation, never a dependency: an unset
+// X_NOTIFY_URL, a failed fetch (the file briefly disappears in
+// the early-morning hours while the home server tidies its
+// JSON files), or an unparsable / empty body all skip the
+// update and keep the stored rows untouched.
+
+const X_NOTIFY_URL_PROPERTY = 'X_NOTIFY_URL';
+const SNS_X_REACTIONS_TAB = 'x_reactions';
+// Keyed by its first column (reaction_key), like the comment
+// tabs: a reaction fact has no use for a leading timestamp.
+const SNS_HISTORY_X_REACTIONS_COLUMNS = [
+  'reaction_key',
+  'kind',
+  'tweet_id',
+  'actor_name',
+  'actor_username',
+  'text',
+  'reaction_tweet_id',
+  'acted_at',
+  'collected_at',
+];
+const SNS_X_REACTION_KINDS = ['like', 'retweet', 'reply', 'quote', 'follow'];
+// Stored reaction rows older than this (by collected_at) are
+// pruned during collection. The screen only ever shows the
+// newest SNS_X_RECENT_POSTS_LIMIT posts — about two months of
+// posting — so 120 days keeps every reaction those posts can
+// still display, with slack.
+// (Defined locally rather than reusing the comments retention:
+// that one keys on posted_at at 60 days, a different contract.)
+const SNS_X_REACTIONS_RETENTION_DAYS = 120;
+// Follow rows served in sns_detail: the screen shows a compact
+// "recent follows" line, not a follower registry.
+const SNS_X_RECENT_FOLLOWS_LIMIT = 10;
+
+// The notify file's notifications array, or null when this run
+// must not touch the stored reactions: X_NOTIFY_URL unset, the
+// fetch failed or did not answer 200, the body is not JSON, or
+// the JSON is not a non-empty array (an empty file is a partial
+// write on the server side, not "no reactions"). Never throws.
+function fetchXNotifyFile_() {
+  const url = getScriptProperty_(X_NOTIFY_URL_PROPERTY);
+  if (!url) {
+    return null;
+  }
+  let res;
+  try {
+    res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  } catch (err) {
+    return null;
+  }
+  if (res.getResponseCode() !== 200) {
+    return null;
+  }
+  let data = null;
+  try {
+    data = JSON.parse(res.getContentText());
+  } catch (err) {
+    data = null;
+  }
+  if (!Array.isArray(data) || !data.length) {
+    return null;
+  }
+  return data;
+}
+
+// x-cli passes the X API's createdAt strings through verbatim
+// ("Wed Nov 18 12:51:28 +0000 2026"). Normalizes one to ISO, or
+// null when the value does not parse — an unreadable moment is
+// stored as empty rather than guessed.
+function xNotifyDateToIso_(value) {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+  const ms = Date.parse(String(value));
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
+// One notification actor as { name, username } text, or null
+// when the actor carries neither a username nor an id to key
+// the fact on.
+function xNotifyActor_(actor) {
+  if (!actor || typeof actor !== 'object') {
+    return null;
+  }
+  const username =
+    actor.username != null && String(actor.username) !== ''
+      ? String(actor.username)
+      : actor.id != null && String(actor.id) !== ''
+        ? String(actor.id)
+        : null;
+  if (!username) {
+    return null;
+  }
+  return {
+    name: actor.name != null ? String(actor.name) : '',
+    username,
+  };
+}
+
+// Expands the notify file's notifications into "x_reactions"
+// rows (see the section header for the keying rules). Pure: the
+// same notification seen again in a later file expands to the
+// same keys, and the collector only offers keys the tab does
+// not already hold, so re-scans never duplicate or refresh a
+// stored fact. Within one file, repeated keys collapse to the
+// first expansion.
+function buildXReactionRows_(notifications, collectedAt) {
+  const rows = [];
+  const seen = {};
+  const push = (row) => {
+    const key = row[0];
+    if (!key || seen[key]) {
+      return;
+    }
+    seen[key] = true;
+    rows.push(row);
+  };
+  (Array.isArray(notifications) ? notifications : []).forEach(
+    (notification) => {
+      if (!notification || typeof notification !== 'object') {
+        return;
+      }
+      const kind = String(notification.kind || '');
+      if (SNS_X_REACTION_KINDS.indexOf(kind) === -1) {
+        return;
+      }
+      const tweet =
+        notification.tweet && typeof notification.tweet === 'object'
+          ? notification.tweet
+          : null;
+      const actors = (
+        Array.isArray(notification.actors) ? notification.actors : []
+      )
+        .map(xNotifyActor_)
+        .filter((actor) => actor);
+      if (kind === 'reply' || kind === 'quote') {
+        if (!tweet) {
+          return;
+        }
+        const target =
+          tweet.inReplyToTweetId != null
+            ? String(tweet.inReplyToTweetId)
+            : '';
+        const reactionId =
+          tweet.id != null
+            ? String(tweet.id)
+            : notification.tweetId != null
+              ? String(notification.tweetId)
+              : '';
+        if (!target || !reactionId) {
+          return;
+        }
+        const author = xNotifyActor_(tweet.author) || actors[0] || null;
+        if (!author) {
+          return;
+        }
+        push([
+          snsHistoryTextCell_(kind + '|' + reactionId),
+          snsHistoryTextCell_(kind),
+          snsHistoryTextCell_(target),
+          snsHistoryTextCell_(author.name),
+          snsHistoryTextCell_(author.username),
+          snsHistoryTextCell_(
+            String(tweet.text || '').slice(0, SNS_CAPTION_MAX_LENGTH)
+          ),
+          snsHistoryTextCell_(reactionId),
+          snsHistoryTextCell_(xNotifyDateToIso_(tweet.createdAt) || ''),
+          snsHistoryTextCell_(collectedAt),
+        ]);
+        return;
+      }
+      if (kind === 'follow') {
+        actors.forEach((actor) => {
+          push([
+            snsHistoryTextCell_('follow||' + actor.username),
+            snsHistoryTextCell_(kind),
+            snsHistoryTextCell_(''),
+            snsHistoryTextCell_(actor.name),
+            snsHistoryTextCell_(actor.username),
+            snsHistoryTextCell_(''),
+            snsHistoryTextCell_(''),
+            snsHistoryTextCell_(''),
+            snsHistoryTextCell_(collectedAt),
+          ]);
+        });
+        return;
+      }
+      // like / retweet: the notification's tweetId is the post
+      // reacted to; every named actor is one fact.
+      const target =
+        notification.tweetId != null
+          ? String(notification.tweetId)
+          : tweet && tweet.id != null
+            ? String(tweet.id)
+            : '';
+      if (!target) {
+        return;
+      }
+      actors.forEach((actor) => {
+        push([
+          snsHistoryTextCell_(kind + '|' + target + '|' + actor.username),
+          snsHistoryTextCell_(kind),
+          snsHistoryTextCell_(target),
+          snsHistoryTextCell_(actor.name),
+          snsHistoryTextCell_(actor.username),
+          snsHistoryTextCell_(''),
+          snsHistoryTextCell_(''),
+          snsHistoryTextCell_(''),
+          snsHistoryTextCell_(collectedAt),
+        ]);
+      });
+    }
+  );
+  return rows;
+}
+
+// Drops the stored reaction rows whose collected_at is older
+// than the retention window, rewriting the tab in place (the
+// pruneOldCommentRows_ write pattern, on collected_at instead
+// of posted_at). Rows whose collected_at does not parse are
+// kept: an unreadable timestamp is not proof of age.
+function pruneXReactionRows_(spreadsheet) {
+  const sheet = spreadsheet.getSheetByName(SNS_X_REACTIONS_TAB);
+  if (!sheet) {
+    return 0;
+  }
+  const columns = SNS_HISTORY_X_REACTIONS_COLUMNS;
+  const rows = readSnsHistoryRows_(sheet, columns);
+  if (!rows.length) {
+    return 0;
+  }
+  const collectedIndex = columns.indexOf('collected_at');
+  const cutoff = Date.now() - SNS_X_REACTIONS_RETENTION_DAYS * SNS_DAY_MS;
+  const kept = rows.filter((row) => {
+    const iso = historyTimestampOrNull_(row[collectedIndex]);
+    const at = iso ? Date.parse(iso) : NaN;
+    return !Number.isFinite(at) || at >= cutoff;
+  });
+  const dropped = rows.length - kept.length;
+  if (!dropped) {
+    return 0;
+  }
+  if (kept.length) {
+    sheet.getRange(2, 1, kept.length, columns.length).setValues(kept);
+  }
+  const surplus = sheet.getLastRow() - (kept.length + 1);
+  if (surplus > 0) {
+    sheet.deleteRows(kept.length + 2, surplus);
+  }
+  return dropped;
+}
+
+// The X half of the comments-style collection: fetches the
+// notify file and stores the reaction facts the tab does not
+// hold yet. Returns { stored, error }; a skipped update (see
+// fetchXNotifyFile_) is neither stored nor an error, and
+// failures never throw — the hosting collection still counts
+// as a success.
+function collectXReactions_(spreadsheet, collectedAt) {
+  const result = { stored: 0, error: null };
+  const notifications = fetchXNotifyFile_();
+  if (!notifications) {
+    return result;
+  }
+  const storedRows =
+    readHistoryTabObjects_(
+      spreadsheet,
+      SNS_X_REACTIONS_TAB,
+      SNS_HISTORY_X_REACTIONS_COLUMNS
+    ) || [];
+  const storedKeys = {};
+  storedRows.forEach((row) => {
+    const key = historyTextOrNull_(row.reaction_key);
+    if (key) {
+      storedKeys[key] = true;
+    }
+  });
+  const newRows = buildXReactionRows_(notifications, collectedAt).filter(
+    (row) => !storedKeys[row[0]]
+  );
+  if (newRows.length) {
+    upsertSnsHistorySheet_(
+      spreadsheet,
+      SNS_X_REACTIONS_TAB,
+      SNS_HISTORY_X_REACTIONS_COLUMNS,
+      0,
+      newRows
+    );
+    result.stored = newRows.length;
+  }
+  pruneXReactionRows_(spreadsheet);
   return result;
 }
 
@@ -6556,6 +6889,65 @@ function buildSnsDetailFromSheet_(openedSpreadsheet) {
       .sort((a, b) => compareTimestampDesc_(a.posted_at, b.posted_at))
       .slice(0, SNS_X_RECENT_POSTS_LIMIT);
   }
+  // The stored reaction facts join the detail here: grouped by
+  // the post they reacted to, restricted to the posts the
+  // detail actually carries (the tab can hold facts for posts
+  // that already fell out of the recent window — they stay
+  // stored but are not served), plus the newest follows as an
+  // account-level list. Each post's facts are newest first by
+  // the moment they happened (acted_at for replies / quotes,
+  // the first collection that saw them for the rest).
+  const reactionRows = readHistoryTabObjects_(
+    spreadsheet,
+    SNS_X_REACTIONS_TAB,
+    SNS_HISTORY_X_REACTIONS_COLUMNS
+  );
+  if (reactionRows) {
+    const servedPostIds = {};
+    (x.recent_posts || []).forEach((post) => {
+      if (post.id) {
+        servedPostIds[post.id] = true;
+      }
+    });
+    const byPost = {};
+    const follows = [];
+    reactionRows.forEach((row) => {
+      const kind = historyTextOrNull_(row.kind);
+      if (!kind) {
+        return;
+      }
+      const entry = {
+        kind,
+        actor_name: historyTextOrNull_(row.actor_name),
+        actor_username: historyTextOrNull_(row.actor_username),
+        text: historyTextOrNull_(row.text),
+        reaction_tweet_id: historyTextOrNull_(row.reaction_tweet_id),
+        acted_at: historyTimestampOrNull_(row.acted_at),
+        collected_at: historyTimestampOrNull_(row.collected_at),
+      };
+      if (kind === 'follow') {
+        follows.push(entry);
+        return;
+      }
+      const tweetId = historyTextOrNull_(row.tweet_id);
+      if (!tweetId || !servedPostIds[tweetId]) {
+        return;
+      }
+      (byPost[tweetId] = byPost[tweetId] || []).push(entry);
+    });
+    Object.keys(byPost).forEach((tweetId) => {
+      byPost[tweetId].sort((a, b) =>
+        compareTimestampDesc_(
+          a.acted_at || a.collected_at,
+          b.acted_at || b.collected_at
+        )
+      );
+    });
+    x.reactions = byPost;
+    x.recent_follows = follows
+      .sort((a, b) => compareTimestampDesc_(a.collected_at, b.collected_at))
+      .slice(0, SNS_X_RECENT_FOLLOWS_LIMIT);
+  }
   return detail;
 }
 
@@ -8236,6 +8628,10 @@ function collectPostComments_(snapshot) {
     if (dm.error) {
       console.log('Instagram DM error: ' + dm.error);
     }
+    const xr = collectXReactions_(spreadsheet, collectedAt);
+    if (xr.error) {
+      console.log('X reactions error: ' + xr.error);
+    }
   } catch (err) {
     console.log(
       'Post comments collection failed: ' +
@@ -9542,6 +9938,12 @@ if (typeof exports !== 'undefined') {
   exports.fetchYouTubeRecentVideos_ = fetchYouTubeRecentVideos_;
   exports.summarizeYouTubeError_ = summarizeYouTubeError_;
   exports.fetchXDetail_ = fetchXDetail_;
+  exports.fetchXNotifyFile_ = fetchXNotifyFile_;
+  exports.xNotifyDateToIso_ = xNotifyDateToIso_;
+  exports.buildXReactionRows_ = buildXReactionRows_;
+  exports.collectXReactions_ = collectXReactions_;
+  exports.SNS_X_REACTIONS_TAB = SNS_X_REACTIONS_TAB;
+  exports.SNS_HISTORY_X_REACTIONS_COLUMNS = SNS_HISTORY_X_REACTIONS_COLUMNS;
   exports.extractXUsage_ = extractXUsage_;
   exports.xDailyDateKey_ = xDailyDateKey_;
   exports.dedupeXDailyPosts_ = dedupeXDailyPosts_;
