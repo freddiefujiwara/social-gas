@@ -313,33 +313,39 @@ describe('X via tweet-gas (GAS-to-GAS sync)', () => {
     });
   });
 
-  describe('fetchXDetail_ with the stats file', () => {
-    const STATS_URL = 'https://example.com/x.freddie.stats.json';
+  describe('fetchXDetail_ with the stats feed', () => {
+    const STATS_URL = 'https://example.com/x.freddie.stats.xml';
 
-    const freshStats = (overrides) =>
-      Object.assign(
-        {
-          ok: true,
-          collected_at: new Date().toISOString(),
-          x: {
-            username: 'freddiefujiwara',
-            followers: 1840,
-            following: 836,
-            recent_posts: [
-              {
-                id: '3001',
-                posted_at: '2026-11-16T01:00:00.000Z',
-                text: 'ファイルからの投稿',
-                views: 111,
-                likes: 1,
-                reposts: 0,
-                replies: 0,
-              },
-            ],
-          },
-        },
-        overrides || {}
-      );
+    // Modeled on the live feed: xs channel elements, then one
+    // item per post (guid = post id, pubDate = its moment,
+    // CDATA description = its text, xs metrics).
+    const statsXml = (collectedAt, followers) =>
+      [
+        '<?xml version="1.0" encoding="UTF-8" ?>',
+        '<rss version="2.0" xmlns:xs="https://freddiefujiwara.com/ns/x-stats">',
+        '<channel>',
+        '  <title>X Stats (@freddiefujiwara)</title>',
+        '  <link>https://twitter.com/freddiefujiwara</link>',
+        '  <xs:username>freddiefujiwara</xs:username>',
+        `  <xs:followers>${followers}</xs:followers>`,
+        '  <xs:following>836</xs:following>',
+        `  <xs:collected-at>${collectedAt}</xs:collected-at>`,
+        '<item>',
+        '  <title><![CDATA[ファイルからの投稿]]></title>',
+        '  <link>https://twitter.com/freddiefujiwara/status/3001</link>',
+        '  <description><![CDATA[ファイルからの投稿]]></description>',
+        '  <pubDate>Mon, 16 Nov 2026 01:00:00 +0000</pubDate>',
+        '  <guid isPermaLink="false">3001</guid>',
+        '  <xs:views>111</xs:views>',
+        '  <xs:likes>1</xs:likes>',
+        '  <xs:reposts>0</xs:reposts>',
+        '  <xs:replies>0</xs:replies>',
+        '</item>',
+        '</channel>',
+        '</rss>',
+      ].join('\n');
+
+    const freshStats = () => statsXml(new Date().toISOString(), 1840);
 
     const tweetGasBody = {
       ok: true,
@@ -364,7 +370,7 @@ describe('X via tweet-gas (GAS-to-GAS sync)', () => {
       };
     };
 
-    it('prefers the file for followers and posts, keeps usage from tweet-gas', () => {
+    it('prefers the feed for followers and posts, keeps usage from tweet-gas', () => {
       configureSync();
       store.X_STATS_URL = STATS_URL;
       routeFetches(() => res(200, freshStats()));
@@ -372,13 +378,18 @@ describe('X via tweet-gas (GAS-to-GAS sync)', () => {
       expect(detail.followers).toBe(1840);
       expect(detail.recent_posts).toHaveLength(1);
       expect(detail.recent_posts[0].id).toBe('3001');
+      expect(detail.recent_posts[0].posted_at).toBe(
+        '2026-11-16T01:00:00.000Z'
+      );
+      expect(detail.recent_posts[0].text).toBe('ファイルからの投稿');
+      expect(detail.recent_posts[0].views).toBe(111);
       expect(detail.recent_posts[0].url).toBe(
         'https://x.com/i/web/status/3001'
       );
       expect(detail.api_balance_usd).toBe(12.5);
     });
 
-    it('falls back to tweet-gas when the file fetch fails', () => {
+    it('falls back to tweet-gas when the feed fetch fails', () => {
       configureSync();
       store.X_STATS_URL = STATS_URL;
       routeFetches(() => res(500, 'server error'));
@@ -387,19 +398,29 @@ describe('X via tweet-gas (GAS-to-GAS sync)', () => {
       expect(detail.recent_posts).toHaveLength(2);
     });
 
-    it('falls back to tweet-gas when the file is stale', () => {
+    it('falls back to tweet-gas when the feed body is not a stats feed', () => {
       configureSync();
       store.X_STATS_URL = STATS_URL;
-      const stale = freshStats({
-        collected_at: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
-      });
+      routeFetches(() => res(200, '{"ok":true,"x":{}}'));
+      const detail = Code.fetchXDetail_();
+      expect(detail.followers).toBe(321);
+      expect(detail.recent_posts).toHaveLength(2);
+    });
+
+    it('falls back to tweet-gas when the feed is stale', () => {
+      configureSync();
+      store.X_STATS_URL = STATS_URL;
+      const stale = statsXml(
+        new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+        1840
+      );
       routeFetches(() => res(200, stale));
       const detail = Code.fetchXDetail_();
       expect(detail.followers).toBe(321);
       expect(detail.recent_posts).toHaveLength(2);
     });
 
-    it('uses the file even while tweet-gas is unconfigured', () => {
+    it('uses the feed even while tweet-gas is unconfigured', () => {
       store.X_STATS_URL = STATS_URL;
       fetchHandler = (url) => {
         if (url === STATS_URL) {
@@ -415,12 +436,64 @@ describe('X via tweet-gas (GAS-to-GAS sync)', () => {
       expect(detail.posts_error).toBeNull();
     });
 
-    it('does not fetch the file while X_STATS_URL is unset', () => {
+    it('does not fetch the feed while X_STATS_URL is unset', () => {
       configureSync();
       fetchHandler = () => res(200, tweetGasBody);
       const detail = Code.fetchXDetail_();
       expect(detail.followers).toBe(321);
       expect(global.UrlFetchApp.fetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('parseXStatsFeed_', () => {
+    it('reads the channel values and the posts', () => {
+      const parsed = Code.parseXStatsFeed_(
+        [
+          '<rss version="2.0" xmlns:xs="https://freddiefujiwara.com/ns/x-stats">',
+          '<channel>',
+          '  <xs:username>freddiefujiwara</xs:username>',
+          '  <xs:followers>1842</xs:followers>',
+          '  <xs:collected-at>2026-11-18T20:03:05.378Z</xs:collected-at>',
+          '<item>',
+          '  <description><![CDATA[本文です]]></description>',
+          '  <pubDate>Wed, 18 Nov 2026 12:51:28 +0000</pubDate>',
+          '  <guid isPermaLink="false">3001</guid>',
+          '  <xs:views>89</xs:views>',
+          '  <xs:likes>1</xs:likes>',
+          '  <xs:reposts>0</xs:reposts>',
+          '  <xs:replies>2</xs:replies>',
+          '</item>',
+          '</channel>',
+          '</rss>',
+        ].join('\n')
+      );
+      expect(parsed.collected_at).toBe('2026-11-18T20:03:05.378Z');
+      expect(parsed.username).toBe('freddiefujiwara');
+      expect(parsed.followers).toBe(1842);
+      expect(parsed.recent_posts).toEqual([
+        {
+          id: '3001',
+          posted_at: '2026-11-18T12:51:28.000Z',
+          text: '本文です',
+          views: 89,
+          likes: 1,
+          reposts: 0,
+          replies: 2,
+        },
+      ]);
+    });
+
+    it('returns null without a collected-at or without items', () => {
+      expect(
+        Code.parseXStatsFeed_('<rss><channel></channel></rss>')
+      ).toBeNull();
+      expect(
+        Code.parseXStatsFeed_(
+          '<rss><channel><xs:collected-at>2026-11-18T20:03:05.378Z</xs:collected-at></channel></rss>'
+        )
+      ).toBeNull();
+      expect(Code.parseXStatsFeed_('not xml at all')).toBeNull();
+      expect(Code.parseXStatsFeed_(null)).toBeNull();
     });
   });
 
