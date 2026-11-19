@@ -469,6 +469,8 @@ describe('SNS follower counts', () => {
           media_count: null,
           views_30d: null,
           non_follower_pct: null,
+          reach_30d: null,
+          saves_30d: null,
           insights_error: null,
         },
         threads: { followers: null },
@@ -496,11 +498,42 @@ describe('SNS follower counts', () => {
           media_count: null,
           views_30d: null,
           non_follower_pct: null,
+          reach_30d: null,
+          saves_30d: null,
           insights_error: null,
         },
         threads: { followers: 252 },
         x: { followers: null },
       });
+    });
+
+    it('exposes reach_30d and saves_30d from the stored snapshot', () => {
+      const snapshot = {
+        collected_at: '2026-11-08T12:00:00.000Z',
+        youtube: { subscribers: 8 },
+        instagram: {
+          freddiefujiwara: 1988,
+          anemone_cancer: 59,
+          media_count: 2404,
+          views_30d: 10000,
+          non_follower_pct: 96.3,
+          insights_error: null,
+          reach_30d: 5000,
+          interactions_30d: {
+            total: 3000,
+            likes: 2000,
+            comments: 300,
+            shares: 400,
+            saves: 300,
+          },
+        },
+        threads: { followers: 252 },
+      };
+      store.SNS_COUNTS_SNAPSHOT = JSON.stringify(snapshot);
+      Code.doGet({ parameter: { action: 'sns_counts' } });
+      const json = lastJson();
+      expect(json.instagram.reach_30d).toBe(5000);
+      expect(json.instagram.saves_30d).toBe(300);
     });
 
     it('never leaks the admin detail fields into the public response', () => {
@@ -539,6 +572,8 @@ describe('SNS follower counts', () => {
           'insights_error',
           'media_count',
           'non_follower_pct',
+          'reach_30d',
+          'saves_30d',
           'views_30d',
         ].sort()
       );

@@ -55,6 +55,7 @@ YouTube・Instagram・Threads のフォロワー数を GAS 自身が定期取得
 - Threads 専用アプリ（ユースケース「Access the Threads API」）のトークンは、GAS 内で完結して取得できる。`THREADS_APP_ID`（Threads API の Settings 画面上部の Threads app ID。Meta のアプリIDとは別物）と `THREADS_APP_SECRET` をスクリプトプロパティに設定し、同じ Settings 画面の「Redirect Callback URLs」にこの Web アプリの /exec のURLを登録したうえで、エディタで `threadsAuthorizeUrl` を実行してログのURLから認可すると、コールバックが長期トークンを `META_THREADS_ACCESS_TOKEN` に保存する。認可で求めるスコープは `threads_basic,threads_manage_insights,threads_read_replies`（フォロワー数はプロフィールではなく `threads_insights` から取るためインサイト側の権限が要り、返信の取得には読み取り側の権限が要る）。スコープを広げたときは、自動更新では権限が増えないので認可をやり直すこと。取得日時が `THREADS_TOKEN_AT` に記録され、50日以上経つと `refreshThreadsTokenIfNeeded` が取得の前に自動更新する（失敗時はスナップショットの `threads.threads_error` に要約が入る）
 - トークン未設定・失効のサービスは null になり、他のサービスの取得は続く
 - Instagram の KPI（メインアカウントのみ、スナップショットの `instagram` 内）：`media_count`（投稿数、`instagram_basic` で取得可）、`views_30d`（過去30日の Views 合計）と `non_follower_pct`（そのうちフォロワー以外％、小数1桁）はインサイト由来で、`META_ACCESS_TOKEN` に `instagram_manage_insights` 権限が付くまでは null のまま（付与後は自動で数値が入る）。インサイト取得が失敗した場合は `instagram.insights_error` に API エラーの要約（HTTP ステータスと Graph API の code / subcode / message、秘密値は含まない）が入り、日別合計へのフォールバック時もその旨が記録される（成功時は null）
+- 公開用の射影には `reach_30d`（過去30日に届いたアカウント数）と `saves_30d`（過去30日の保存数、スナップショットの `interactions_30d.saves`）も含む（トップページのヒーロー表示用で、値は次節の詳細データと同じ保存値）
 - なお `action=sns_counts` が返すのは公開用の射影（上記のフォロワー数と KPI のみ）で、次節の詳細データは公開アクションには一切含まれない
 
 ## SNS詳細（action=sns_detail、認証必須）
