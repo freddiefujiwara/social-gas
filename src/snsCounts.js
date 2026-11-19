@@ -92,7 +92,10 @@ function getSnsCountsSnapshot_() {
 // snapshot itself also carries the admin-only detail collected for
 // action=sns_detail (account insights, demographics, per-post and
 // per-video numbers); those must never leak into the public action,
-// so the snapshot is never returned verbatim here.
+// so the snapshot is never returned verbatim here. reach_30d and
+// saves_30d (the snapshot's interactions_30d.saves) are part of the
+// projection because the top page hero shows them; they are the
+// same stored values action=sns_detail serves.
 function buildSnsCountsResponse_() {
   const snapshot = getSnsCountsSnapshot_();
   if (!snapshot) {
@@ -107,6 +110,8 @@ function buildSnsCountsResponse_() {
         media_count: null,
         views_30d: null,
         non_follower_pct: null,
+        reach_30d: null,
+        saves_30d: null,
         insights_error: null,
       },
       threads: { followers: null },
@@ -128,6 +133,10 @@ function buildSnsCountsResponse_() {
       media_count: snsNumberOrNull_(instagram.media_count),
       views_30d: snsNumberOrNull_(instagram.views_30d),
       non_follower_pct: snsNumberOrNull_(instagram.non_follower_pct),
+      reach_30d: snsNumberOrNull_(instagram.reach_30d),
+      saves_30d: snsNumberOrNull_(
+        instagram.interactions_30d && instagram.interactions_30d.saves
+      ),
       insights_error:
         instagram.insights_error != null ? instagram.insights_error : null,
     },
