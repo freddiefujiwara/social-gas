@@ -153,6 +153,28 @@ describe('Post comments / replies collection and RSS', () => {
       }
       expect(Code.planCommentTargets_(fresh, many, 5)).toHaveLength(5);
     });
+
+    it('fetches a first-seen post published inside the grace window, and only that kind', () => {
+      const targets = Code.planCommentTargets_(
+        [
+          // First seen, published 30 minutes ago, has comments:
+          // the publication moment stands in as the observation.
+          { id: 'n1', count: 2, posted_at: '2026-11-16T00:30:00.000Z' },
+          // First seen but published before the grace window.
+          { id: 'n2', count: 4, posted_at: '2026-11-10T00:00:00.000Z' },
+          // First seen inside the window but nothing to fetch.
+          { id: 'n3', count: 0, posted_at: '2026-11-16T00:30:00.000Z' },
+          // First seen with no readable publication moment.
+          { id: 'n4', count: 1, posted_at: '' },
+        ],
+        prev,
+        5,
+        '2026-11-16T01:00:00.000Z'
+      );
+      expect(targets).toEqual([
+        { id: 'n1', prevCollectedAt: '2026-11-16T00:30:00.000Z' },
+      ]);
+    });
   });
 
   describe('previousCountsById_', () => {
@@ -469,6 +491,86 @@ describe('Post comments / replies collection and RSS', () => {
       expect(sheets.ig_comments).toBeUndefined();
     });
 
+    it('fetches a first-seen post’s comments instead of baselining them away', () => {
+      // No media row yet: the post was published at 00:10 and
+      // collected its first comments before the 01:00 collection
+      // ever saw it. The publication moment anchors the first
+      // boundary (minus the grace), so both comments land; one
+      // from before that reach does not.
+      seedTab('media', Code.SNS_HISTORY_MEDIA_COLUMNS, []);
+      fetchHandler = (url) => {
+        expect(url).toContain('/m1/comments');
+        return res(200, {
+          data: [
+            {
+              id: 'c-ancient',
+              text: '範囲外のコメント',
+              username: 'erin',
+              timestamp: '2026-11-13T00:00:00+0000',
+              like_count: 0,
+            },
+            {
+              id: 'c-first',
+              text: '初見前のコメント',
+              username: 'alice',
+              timestamp: '2026-11-16T00:20:00+0000',
+              like_count: 1,
+            },
+            {
+              id: 'c-second',
+              text: '初見前のコメント2',
+              username: 'bob',
+              timestamp: '2026-11-16T00:40:00+0000',
+              like_count: 0,
+            },
+          ],
+        });
+      };
+      const firstSeen = {
+        collected_at: T1,
+        instagram: {
+          recent_media: [
+            {
+              id: 'm1',
+              permalink: 'https://www.instagram.com/reel/M1/',
+              comments: 2,
+              posted_at: '2026-11-16T00:10:00.000Z',
+            },
+          ],
+        },
+        threads: { recent_posts: null },
+      };
+      const result = Code.collectInstagramComments_(
+        spreadsheet,
+        firstSeen,
+        T1
+      );
+      expect(result).toEqual({ stored: 2, error: null });
+      const ids = sheets.ig_comments.rows.slice(1).map((row) => row[0]);
+      expect(ids.sort()).toEqual(['c-first', 'c-second']);
+    });
+
+    it('baselines a first-seen post published before the grace window without fetching', () => {
+      seedTab('media', Code.SNS_HISTORY_MEDIA_COLUMNS, []);
+      const old = {
+        collected_at: T1,
+        instagram: {
+          recent_media: [
+            {
+              id: 'm1',
+              permalink: 'https://www.instagram.com/reel/M1/',
+              comments: 7,
+              posted_at: '2026-11-01T00:00:00.000Z',
+            },
+          ],
+        },
+        threads: { recent_posts: null },
+      };
+      const result = Code.collectInstagramComments_(spreadsheet, old, T1);
+      expect(result).toEqual({ stored: 0, error: null });
+      expect(fetchCalls).toHaveLength(0);
+    });
+
     it('summarizes a failed fetch instead of throwing', () => {
       seedTab('media', Code.SNS_HISTORY_MEDIA_COLUMNS, [mediaRow(2, T0)]);
       fetchHandler = () =>
@@ -574,6 +676,45 @@ describe('Post comments / replies collection and RSS', () => {
           T1,
         ],
       ]);
+    });
+
+    it('fetches a first-seen post’s replies instead of baselining them away', () => {
+      seedTab('threads_media', Code.SNS_HISTORY_THREADS_MEDIA_COLUMNS, []);
+      fetchHandler = (url) => {
+        expect(url).toContain('/p1/conversation');
+        return res(200, {
+          data: [
+            {
+              id: 'r-ancient',
+              text: '範囲外の返信',
+              username: 'erin',
+              timestamp: '2026-11-13T00:00:00Z',
+              permalink: 'https://www.threads.net/@erin/post/RA',
+              is_reply_owned_by_me: false,
+            },
+            {
+              id: 'r-first',
+              text: '初見前の返信',
+              username: 'carol',
+              timestamp: '2026-11-16T00:30:00Z',
+              permalink: 'https://www.threads.net/@carol/post/RF',
+              is_reply_owned_by_me: false,
+            },
+          ],
+        });
+      };
+      const firstSeen = {
+        collected_at: T1,
+        instagram: { recent_media: null },
+        threads: {
+          recent_posts: [
+            { id: 'p1', replies: 1, posted_at: '2026-11-16T00:10:00.000Z' },
+          ],
+        },
+      };
+      const result = Code.collectThreadsReplies_(spreadsheet, firstSeen, T1);
+      expect(result).toEqual({ stored: 1, error: null });
+      expect(sheets.threads_replies.rows[1][0]).toBe('r-first');
     });
   });
 

@@ -57,7 +57,12 @@ import { historyTextOrNull_, historyTimestampOrNull_, readHistoryTabObjects_ } f
 // post, so enabling the feature does not flood the feed with
 // the comments that were already there — while a comment the
 // platform's counts were slow to reflect is not lost either
-// (see SNS_COMMENTS_BOUNDARY_GRACE_MS).
+// (see SNS_COMMENTS_BOUNDARY_GRACE_MS). A post the collection
+// sees for the first time is fetched on that first sight too
+// when it was published inside the same window and already
+// carries comments: without that, everything it collected
+// before the first observation would become the baseline
+// unread (a new post's first comments land exactly there).
 
 const COMMENTS_RSS_TOKEN_PROPERTY = 'COMMENTS_RSS_TOKEN';
 const SNS_IG_COMMENTS_TAB = 'ig_comments';
@@ -184,26 +189,52 @@ function previousCountsById_(rows, idColumn, countColumn) {
 }
 
 // Which posts to fetch detail for: the ones present in the
-// previous baseline whose count grew. A post with no baseline
-// row (first seen this run) is skipped — its current count
-// becomes the baseline when the history upsert lands, and only
-// growth after that fetches detail. Capped so one collection
-// never fans out beyond SNS_COMMENTS_DETAIL_FETCH_MAX fetches.
-function planCommentTargets_(freshCounts, previousById, maxTargets) {
+// previous baseline whose count grew — plus a post with no
+// baseline row (first seen this run) when it was published
+// within the grace window before this collection and already
+// carries comments. For a first-seen post the publication
+// moment stands in as the previous observation, so the
+// first-fetch boundary (publication minus the grace) reaches
+// back before the post existed and every comment it has
+// qualifies; without this, the comments a new post collects
+// before the collection first sees it would become the
+// baseline unread and no later growth would ever fetch them.
+// A first-seen post older than the window is skipped — its
+// current count becomes the baseline when the history upsert
+// lands, and only growth after that fetches detail. Capped so
+// one collection never fans out beyond
+// SNS_COMMENTS_DETAIL_FETCH_MAX fetches.
+function planCommentTargets_(freshCounts, previousById, maxTargets, nowIso) {
   const targets = [];
+  const now = Date.parse(nowIso || '');
   (freshCounts || []).forEach((entry) => {
     if (!entry || !entry.id) {
       return;
     }
+    if (typeof entry.count !== 'number') {
+      return;
+    }
     const prev = previousById ? previousById[entry.id] : null;
-    if (!prev) {
+    if (prev) {
+      if (typeof prev.count !== 'number') {
+        return;
+      }
+      if (entry.count > prev.count) {
+        targets.push({
+          id: entry.id,
+          prevCollectedAt: prev.collected_at || '',
+        });
+      }
       return;
     }
-    if (typeof entry.count !== 'number' || typeof prev.count !== 'number') {
-      return;
-    }
-    if (entry.count > prev.count) {
-      targets.push({ id: entry.id, prevCollectedAt: prev.collected_at || '' });
+    const postedAt = Date.parse(entry.posted_at || '');
+    if (
+      entry.count > 0 &&
+      Number.isFinite(postedAt) &&
+      Number.isFinite(now) &&
+      now - postedAt <= SNS_COMMENTS_BOUNDARY_GRACE_MS
+    ) {
+      targets.push({ id: entry.id, prevCollectedAt: entry.posted_at || '' });
     }
   });
   return targets.slice(0, maxTargets);
@@ -462,12 +493,14 @@ function collectInstagramComments_(spreadsheet, snapshot, collectedAt) {
       return {
         id: String(entry.id),
         count: snsNumberOrNull_(entry.comments),
+        posted_at: entry.posted_at || '',
       };
     });
   const targets = planCommentTargets_(
     freshCounts,
     prevById,
-    SNS_COMMENTS_DETAIL_FETCH_MAX
+    SNS_COMMENTS_DETAIL_FETCH_MAX,
+    collectedAt
   );
   const failures = [];
   const newRows = [];
@@ -555,11 +588,13 @@ function collectThreadsReplies_(spreadsheet, snapshot, collectedAt) {
     .map((entry) => ({
       id: String(entry.id),
       count: snsNumberOrNull_(entry.replies),
+      posted_at: entry.posted_at || '',
     }));
   const targets = planCommentTargets_(
     freshCounts,
     prevById,
-    SNS_COMMENTS_DETAIL_FETCH_MAX
+    SNS_COMMENTS_DETAIL_FETCH_MAX,
+    collectedAt
   );
   const failures = [];
   const newRows = [];
