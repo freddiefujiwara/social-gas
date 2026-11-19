@@ -134,7 +134,8 @@ Threads の数値が取れないときの切り分け用。`debugThreadsFollower
 他の -gas リポジトリと同じ運用。
 
 - `npm test`：vitest（カバレッジ付き）
-- `npm run build`：src/Code.js と appsscript.json を dist/ へ
+- ソースは役割ごとのモジュールに分割（src/*.js、src/Code.js は全体を re-export する入口）。モジュール一覧と並び順は build.js の MODULES が正本
+- `npm run build`：src/*.js を連結して dist/Code.gs を生成し、appsscript.json を dist/ へコピー
 - CI（.github/workflows/node.yaml）：
   - 全ブランチでテスト
   - main 以外への push → ステージング用プロジェクトへデプロイ（Secrets: STAGING_SCRIPT_ID / STAGING_DEPLOYMENT_ID）
