@@ -7,12 +7,46 @@ import { jsonOut_ } from './ga4.js';
 import { COMMENTS_RSS_CHANNELS, COMMENTS_RSS_TOKEN_PROPERTY, SNS_COMMENTS_RSS_LIMIT, SNS_COMMENTS_RSS_TITLE_CHARS } from './comments.js';
 
 function escapeXmlText_(value) {
-  return String(value === null || value === undefined ? '' : value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
+  let text;
+  try {
+    text = String(value === null || value === undefined ? '' : value);
+  } catch (err) {
+    // A value whose toString is not a function (producible
+    // via JSON) has no text form; it must not take the whole
+    // feed down with it.
+    text = '';
+  }
+  return (
+    text
+      // XML 1.0 cannot carry C0 controls other than tab / LF /
+      // CR, and a lone surrogate is not encodable: either one
+      // would poison the document for strict readers, the same
+      // failure the pubDate rule below guards against. Lone
+      // surrogates become U+FFFD, the replacement the reader
+      // side itself uses for undecodable input.
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+      .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, '�')
+      .replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '�')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;')
+  );
+}
+
+// A stored row field as feed text: strings as they are, other
+// scalars stringified, and anything else (objects, arrays, a
+// value whose toString is not a function) as empty — a
+// deformed field degrades its own item, never the whole feed.
+function rssFieldText_(value) {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  return '';
 }
 
 function xmlOut_(xml) {
@@ -32,7 +66,8 @@ function xmlOut_(xml) {
 // pubDate would poison the whole feed for strict readers.
 function buildCommentsRss_(source, rows) {
   const channel = COMMENTS_RSS_CHANNELS[source];
-  const items = (rows || [])
+  const items = (Array.isArray(rows) ? rows : [])
+    .filter((row) => row && typeof row === 'object')
     .slice()
     .sort((a, b) => compareTimestampDesc_(a.posted_at, b.posted_at))
     .slice(0, SNS_COMMENTS_RSS_LIMIT);
@@ -45,21 +80,36 @@ function buildCommentsRss_(source, rows) {
     '<description>' + escapeXmlText_(channel.description) + '</description>',
   ];
   items.forEach((row) => {
-    const when = new Date(row.posted_at || '');
-    if (Number.isNaN(when.getTime()) || !row.id) {
+    let when;
+    try {
+      when = new Date(row.posted_at || '');
+    } catch (err) {
       return;
     }
-    const text = row.text || '';
-    const title =
-      '@' +
-      (row.username || '') +
-      ': ' +
-      text.slice(0, SNS_COMMENTS_RSS_TITLE_CHARS);
+    const id = rssFieldText_(row.id);
+    if (Number.isNaN(when.getTime()) || !id) {
+      return;
+    }
+    const text = rssFieldText_(row.text);
+    let titleText = text.slice(0, SNS_COMMENTS_RSS_TITLE_CHARS);
+    // The truncation must not split a surrogate pair: a title
+    // ending in half a character is not encodable (the ogp-png
+    // truncation had the same defect). The pair is taken whole
+    // or not at all.
+    if (titleText.length) {
+      const last = titleText.charCodeAt(titleText.length - 1);
+      if (last >= 0xd800 && last <= 0xdbff) {
+        titleText = titleText.slice(0, -1);
+      }
+    }
+    const title = '@' + rssFieldText_(row.username) + ': ' + titleText;
     lines.push(
       '<item>',
       '<title>' + escapeXmlText_(title) + '</title>',
-      '<link>' + escapeXmlText_(row.permalink || channel.link) + '</link>',
-      '<guid isPermaLink="false">' + escapeXmlText_(row.id) + '</guid>',
+      '<link>' +
+        escapeXmlText_(rssFieldText_(row.permalink) || channel.link) +
+        '</link>',
+      '<guid isPermaLink="false">' + escapeXmlText_(id) + '</guid>',
       '<pubDate>' + when.toUTCString() + '</pubDate>',
       '<description>' + escapeXmlText_(text) + '</description>',
       '</item>'

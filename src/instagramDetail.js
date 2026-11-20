@@ -2,7 +2,7 @@
 // per-account detail block of sns_detail.
 
 import { getScriptProperty_ } from './auth.js';
-import { META_GRAPH_BASE, SNS_INSTAGRAM_MAIN_ID } from './snsCounts.js';
+import { META_GRAPH_BASE, SNS_INSTAGRAM_MAIN_ID, apiNumberOrNull_ } from './snsCounts.js';
 import { fetchInstagramDailyFollows_ } from './instagramDaily.js';
 import { followsBreakdownLabels_, parseFollowsBreakdown_ } from './instagramMedia.js';
 
@@ -23,8 +23,7 @@ function fetchInstagramMediaCount_() {
       return null;
     }
     const data = JSON.parse(res.getContentText());
-    const count = Number(data && data.media_count);
-    return Number.isFinite(count) ? count : null;
+    return apiNumberOrNull_(data && data.media_count);
   } catch (err) {
     return null;
   }
@@ -216,8 +215,8 @@ function parseViewsBreakdown_(data) {
     }
     ((breakdown && breakdown.results) || []).forEach((row) => {
       const dims = (row && row.dimension_values) || [];
-      const value = Number(row && row.value);
-      if (!Number.isFinite(value)) {
+      const value = apiNumberOrNull_(row && row.value);
+      if (value === null) {
         return;
       }
       if (dims.includes('NON_FOLLOWER')) {
@@ -231,9 +230,9 @@ function parseViewsBreakdown_(data) {
     return null;
   }
   const partsTotal = (follower || 0) + (nonFollower || 0);
-  const reported = Number(totalValue.value);
+  const reported = apiNumberOrNull_(totalValue.value);
   return {
-    total: Number.isFinite(reported) ? reported : partsTotal,
+    total: reported !== null ? reported : partsTotal,
     follower: follower || 0,
     nonFollower: nonFollower || 0,
   };
@@ -248,8 +247,10 @@ function parseViewsDailyTotal_(data) {
   if (!entry) {
     return null;
   }
-  const totalValue = Number(entry.total_value && entry.total_value.value);
-  if (Number.isFinite(totalValue)) {
+  const totalValue = apiNumberOrNull_(
+    entry.total_value && entry.total_value.value
+  );
+  if (totalValue !== null) {
     return totalValue;
   }
   const values = Array.isArray(entry.values) ? entry.values : null;
@@ -259,8 +260,8 @@ function parseViewsDailyTotal_(data) {
   let total = 0;
   let seen = false;
   values.forEach((row) => {
-    const value = Number(row && row.value);
-    if (Number.isFinite(value)) {
+    const value = apiNumberOrNull_(row && row.value);
+    if (value !== null) {
       total += value;
       seen = true;
     }
@@ -339,8 +340,7 @@ function parseInsightsTotalValue_(data) {
   if (!entry) {
     return null;
   }
-  const value = Number(entry.total_value && entry.total_value.value);
-  return Number.isFinite(value) ? value : null;
+  return apiNumberOrNull_(entry.total_value && entry.total_value.value);
 }
 
 // Sums only the per-day values[].value of an insights response, or
@@ -353,8 +353,8 @@ function parseInsightsDailySum_(data) {
   let total = 0;
   let seen = false;
   entry.values.forEach((row) => {
-    const value = Number(row && row.value);
-    if (Number.isFinite(value)) {
+    const value = apiNumberOrNull_(row && row.value);
+    if (value !== null) {
       total += value;
       seen = true;
     }

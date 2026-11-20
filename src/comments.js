@@ -302,6 +302,22 @@ function firstFetchBoundary_(prevCollectedAtIso) {
   return new Date(at - SNS_COMMENTS_BOUNDARY_GRACE_MS).toISOString();
 }
 
+// One field of an API item as text: the value's string form,
+// or '' when it is absent — or when its toString is not a
+// function (producible via JSON), which would otherwise make
+// String() throw and take the whole page of comments down
+// with one deformed item.
+function commentFieldText_(value) {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  try {
+    return String(value);
+  } catch (err) {
+    return '';
+  }
+}
+
 // One IG comments page (newest first) flattened to plain comment
 // objects: top-level comments with parent_id '' and their
 // replies with the parent's id. The media's comments insight
@@ -310,11 +326,11 @@ function parseInstagramComments_(data) {
   const items = data && Array.isArray(data.data) ? data.data : [];
   const comments = [];
   const toComment = (item, parentId) => ({
-    id: String(item.id),
+    id: commentFieldText_(item.id),
     parent_id: parentId,
-    username: item.username != null ? String(item.username) : '',
-    text: item.text != null ? String(item.text) : '',
-    posted_at: item.timestamp || '',
+    username: commentFieldText_(item.username),
+    text: commentFieldText_(item.text),
+    posted_at: commentFieldText_(item.timestamp),
     like_count: snsNumberOrNull_(item.like_count),
   });
   items.forEach((item) => {
@@ -328,7 +344,7 @@ function parseInstagramComments_(data) {
       if (!reply || reply.id == null) {
         return;
       }
-      comments.push(toComment(reply, String(item.id)));
+      comments.push(toComment(reply, commentFieldText_(item.id)));
     });
   });
   return comments;
@@ -376,18 +392,18 @@ function parseThreadsConversation_(data, postId) {
     if (!item || item.id == null) {
       return;
     }
-    if (String(item.id) === String(postId)) {
+    if (commentFieldText_(item.id) === String(postId)) {
       return;
     }
     if (item.is_reply_owned_by_me === true) {
       return;
     }
     replies.push({
-      id: String(item.id),
-      username: item.username != null ? String(item.username) : '',
-      text: item.text != null ? String(item.text) : '',
-      posted_at: item.timestamp || '',
-      permalink: item.permalink || '',
+      id: commentFieldText_(item.id),
+      username: commentFieldText_(item.username),
+      text: commentFieldText_(item.text),
+      posted_at: commentFieldText_(item.timestamp),
+      permalink: commentFieldText_(item.permalink),
     });
   });
   return replies;
@@ -727,24 +743,20 @@ function parseInstagramDmMessages_(data, pageId) {
       return;
     }
     const from = item.from || {};
-    const fromId = from.id != null ? String(from.id) : '';
+    const fromId = commentFieldText_(from.id);
     if (fromId === String(pageId) || fromId === SNS_INSTAGRAM_MAIN_ID) {
       return;
     }
-    const text =
-      item.message != null && String(item.message) !== ''
-        ? String(item.message)
-        : SNS_DM_ATTACHMENT_TEXT;
+    const messageText = commentFieldText_(item.message);
+    const text = messageText !== '' ? messageText : SNS_DM_ATTACHMENT_TEXT;
     messages.push({
-      id: String(item.id),
+      id: commentFieldText_(item.id),
       username:
         from.username != null
-          ? String(from.username)
-          : from.name != null
-            ? String(from.name)
-            : '',
+          ? commentFieldText_(from.username)
+          : commentFieldText_(from.name),
       text,
-      posted_at: item.created_time || '',
+      posted_at: commentFieldText_(item.created_time),
     });
   });
   return messages;

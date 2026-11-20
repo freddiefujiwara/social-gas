@@ -1,7 +1,7 @@
 // Instagram demographics and recent media (with media insights).
 
 import { getScriptProperty_ } from './auth.js';
-import { META_GRAPH_BASE, SNS_INSTAGRAM_MAIN_ID } from './snsCounts.js';
+import { META_GRAPH_BASE, SNS_INSTAGRAM_MAIN_ID, apiNumberOrNull_ } from './snsCounts.js';
 import { SNS_DEMOGRAPHICS_TOP_LIMIT, SNS_RECENT_MEDIA_LIMIT, fetchInsightsJson_, joinSnsErrors_ } from './instagramDetail.js';
 import { readStoredMediaDurations_, resolveMediaDurationSec_ } from './mediaDuration.js';
 
@@ -33,8 +33,8 @@ function parseFollowsBreakdown_(data) {
       return;
     }
     ((breakdown && breakdown.results) || []).forEach((row) => {
-      const value = Number(row && row.value);
-      if (!Number.isFinite(value)) {
+      const value = apiNumberOrNull_(row && row.value);
+      if (value === null) {
         return;
       }
       const dims = ((row && row.dimension_values) || []).map((dim) =>
@@ -165,9 +165,9 @@ function parseDemographicsBreakdown_(data, dims) {
     rows = ((breakdown && breakdown.results) || [])
       .map((row) => ({
         key: ((row && row.dimension_values) || []).join('/'),
-        value: Number(row && row.value),
+        value: apiNumberOrNull_(row && row.value),
       }))
-      .filter((row) => Number.isFinite(row.value));
+      .filter((row) => row.value !== null);
   });
   if (!rows) {
     return null;
@@ -341,8 +341,8 @@ function parseMediaInsights_(data) {
     if (raw == null && entry.total_value) {
       raw = entry.total_value.value;
     }
-    const num = Number(raw);
-    if (!Number.isFinite(num)) {
+    const num = apiNumberOrNull_(raw);
+    if (num === null) {
       return;
     }
     switch (entry.name) {
