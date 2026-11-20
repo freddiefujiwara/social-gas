@@ -349,6 +349,57 @@ describe('Instagram DM collection and RSS', () => {
       expect(result).toEqual({ stored: 1, error: null });
     });
 
+    it('baselines a first-seen conversation’s past instead of flooding the feed with it', () => {
+      // The tab has rows, but none for convnew: it sat outside
+      // the scanned window while its history accumulated, then
+      // resurfaced. Only its messages inside the grace window
+      // are imported; the older ones become the baseline.
+      seedTab('ig_dm', Code.SNS_HISTORY_IG_DM_COLUMNS, [
+        ['m0', 'convother', 'bob', '既存', '2026-11-16T00:00:00+0000', 'https://www.instagram.com/direct/inbox/', T1],
+      ]);
+      routeFetches({
+        conversations: ['convnew'],
+        messagesByConv: {
+          convnew: [
+            dm('m-ancient', 'user-b', { username: 'carol' }, '先月の連絡', '2026-10-07T00:00:00+0000'),
+            dm('m-recent', 'user-b', { username: 'carol' }, '昨日の連絡', '2026-11-16T12:00:00+0000'),
+          ],
+        },
+      });
+      const result = Code.collectInstagramDm_(spreadsheet, T1);
+      expect(result).toEqual({ stored: 1, error: null });
+      const ids = sheets.ig_dm.rows.slice(1).map((row) => row[0]);
+      expect(ids).toEqual(['m0', 'm-recent']);
+    });
+
+    it('still stores a later arrival in a first-seen conversation whose past was baselined', () => {
+      routeFetches({
+        conversations: ['convnew'],
+        messagesByConv: {
+          convnew: [
+            dm('m-ancient', 'user-b', { username: 'carol' }, '先月の連絡', '2026-10-07T00:00:00+0000'),
+          ],
+        },
+      });
+      const first = Code.collectInstagramDm_(spreadsheet, T1);
+      expect(first).toEqual({ stored: 0, error: null });
+      routeFetches({
+        conversations: ['convnew'],
+        messagesByConv: {
+          convnew: [
+            dm('m-ancient', 'user-b', { username: 'carol' }, '先月の連絡', '2026-10-07T00:00:00+0000'),
+            dm('m-arrival', 'user-b', { username: 'carol' }, '新しい連絡', '2026-11-18T00:30:00+0000'),
+          ],
+        },
+      });
+      const second = Code.collectInstagramDm_(
+        spreadsheet,
+        '2026-11-18T01:00:00.000Z'
+      );
+      expect(second).toEqual({ stored: 1, error: null });
+      expect(sheets.ig_dm.rows[1][0]).toBe('m-arrival');
+    });
+
     it('degrades to an error summary when the page cannot be resolved', () => {
       fetchHandler = (url) => {
         if (url.includes('/362616541057810')) {
