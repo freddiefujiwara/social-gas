@@ -1,6 +1,6 @@
 // Threads detail: account metrics and per-post metrics.
 
-import { THREADS_GRAPH_BASE, threadsToken_, threadsUserId_ } from './snsCounts.js';
+import { THREADS_GRAPH_BASE, apiNumberOrNull_, threadsToken_, threadsUserId_ } from './snsCounts.js';
 import { fetchInsightsJson_, joinSnsErrors_, parseViewsDailyTotal_, snsInsightsWindow_ } from './instagramDetail.js';
 import { SNS_CAPTION_MAX_LENGTH } from './instagramMedia.js';
 
@@ -160,8 +160,8 @@ function parseThreadsMediaInsights_(data) {
     if (raw == null && entry.total_value) {
       raw = entry.total_value.value;
     }
-    const num = Number(raw);
-    if (!Number.isFinite(num)) {
+    const num = apiNumberOrNull_(raw);
+    if (num === null) {
       return;
     }
     if (THREADS_ACCOUNT_METRICS.indexOf(entry.name) >= 0) {
@@ -258,8 +258,10 @@ function threadsInsightEntryTotal_(entry) {
   if (!entry) {
     return null;
   }
-  const totalValue = Number(entry.total_value && entry.total_value.value);
-  if (Number.isFinite(totalValue)) {
+  const totalValue = apiNumberOrNull_(
+    entry.total_value && entry.total_value.value
+  );
+  if (totalValue !== null) {
     return totalValue;
   }
   if (!Array.isArray(entry.values)) {
@@ -268,8 +270,8 @@ function threadsInsightEntryTotal_(entry) {
   let total = 0;
   let seen = false;
   entry.values.forEach((row) => {
-    const value = Number(row && row.value);
-    if (Number.isFinite(value)) {
+    const value = apiNumberOrNull_(row && row.value);
+    if (value !== null) {
       total += value;
       seen = true;
     }

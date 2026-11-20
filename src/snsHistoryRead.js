@@ -59,11 +59,20 @@ function snsHistoryTimestampCell_(value) {
 }
 
 function snsHistoryNumberCell_(value) {
-  if (value === null || value === undefined || value === '') {
-    return null;
+  // Only a finite number or a non-blank numeric string reads
+  // as a number. Bare Number() coercion would read a boolean
+  // cell as 1 / 0, an array as its element, whitespace as 0
+  // and a Date as its epoch milliseconds — values the cell
+  // never reported — and would throw on a value whose
+  // toString is not a function.
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
   }
-  const num = Number(value);
-  return Number.isFinite(num) ? num : null;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+  }
+  return null;
 }
 
 // The history response rides the same read cache as the

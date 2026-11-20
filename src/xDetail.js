@@ -50,13 +50,18 @@ const SNS_X_STATS_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const SNS_X_DAILY_POSTS_LIMIT = 90;
 
 // A wire value from the tweet-gas response as a number, or null
-// when it did not arrive as one.
+// when it did not arrive as one. Bare Number() coercion is not
+// used: it reads '' / whitespace as 0, true as 1 and [5] as 5,
+// and throws on a value whose toString is not a function.
 function xWireNumberOrNull_(value) {
-  if (value === null || value === undefined) {
-    return null;
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
   }
-  const num = Number(value);
-  return Number.isFinite(num) ? num : null;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+  }
+  return null;
 }
 
 // The day key of one X daily-posts entry: the leading

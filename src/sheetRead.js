@@ -175,9 +175,16 @@ function readHistoryTabLastRowObject_(spreadsheet, name, columns) {
 }
 
 // A text cell as a string, or null when it holds nothing.
+// Non-scalar cells (objects / arrays) read as null: String()
+// would leak "[object Object]" into served text, and throws
+// outright when the value's toString is not a function. A
+// Date cell keeps its String() form, as before.
 function historyTextOrNull_(value) {
   if (value === null || value === undefined || value === '') {
     return null;
+  }
+  if (typeof value === 'object') {
+    return value instanceof Date ? String(value) : null;
   }
   return String(value);
 }
@@ -192,14 +199,46 @@ function historyTimestampOrNull_(value) {
 // (posted_at / published_at): parsed instants when both sides
 // parse, the ISO strings themselves otherwise.
 function compareTimestampDesc_(a, b) {
-  const ta = Date.parse(a || '');
-  const tb = Date.parse(b || '');
-  if (Number.isFinite(ta) && Number.isFinite(tb)) {
+  const x = timestampSortText_(a);
+  const y = timestampSortText_(b);
+  const ta = Date.parse(x);
+  const tb = Date.parse(y);
+  const aParses = Number.isFinite(ta);
+  const bParses = Number.isFinite(tb);
+  if (aParses && bParses) {
     return tb - ta;
   }
-  const x = String(a || '');
-  const y = String(b || '');
+  // A parseable instant always sorts before an unparseable
+  // one, instead of falling back to a string comparison
+  // between the two: mixing the two comparisons is not
+  // transitive (a string like '4' parses as a year while
+  // '3 -' does not), and an inconsistent comparator makes
+  // sort() emit rows in arbitrary order. Over the stored
+  // values — ISO strings and empties — this orders exactly
+  // as the plain string comparison did.
+  if (aParses) {
+    return -1;
+  }
+  if (bParses) {
+    return 1;
+  }
   return x < y ? 1 : x > y ? -1 : 0;
+}
+
+// A timestamp as the text the ordering above compares: the
+// value's string form, or '' when it holds nothing — or when
+// its toString is not a function, which would otherwise make
+// Date.parse / String throw and take the whole sort down
+// with one deformed row.
+function timestampSortText_(value) {
+  if (!value) {
+    return '';
+  }
+  try {
+    return String(value);
+  } catch (err) {
+    return '';
+  }
 }
 
 // The account row with the newest collected_at, as

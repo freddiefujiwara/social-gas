@@ -143,14 +143,26 @@ function articleIdFromPath_(path) {
 // views descending, cut to the top `limit`.
 function rankTopArticles_(rows, limit) {
   const merged = new Map();
-  (rows || []).forEach((row) => {
-    const dimensionValues = row.dimensionValues || [];
-    const metricValues = row.metricValues || [];
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    if (!row || typeof row !== 'object') return;
+    const dimensionValues = Array.isArray(row.dimensionValues)
+      ? row.dimensionValues
+      : [];
+    const metricValues = Array.isArray(row.metricValues)
+      ? row.metricValues
+      : [];
     const id = articleIdFromPath_(
       dimensionValues[0] && dimensionValues[0].value
     );
     if (!id) return;
-    const views = Number(metricValues[0] && metricValues[0].value) || 0;
+    // GA4 metric values arrive as strings; anything that is
+    // not a number or a string (a deformed row) reads as 0
+    // views instead of throwing inside Number().
+    const rawViews = metricValues[0] && metricValues[0].value;
+    const views =
+      typeof rawViews === 'number' || typeof rawViews === 'string'
+        ? Number(rawViews) || 0
+        : 0;
     merged.set(id, (merged.get(id) || 0) + views);
   });
   return Array.from(merged.entries())

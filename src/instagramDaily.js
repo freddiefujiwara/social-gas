@@ -55,6 +55,12 @@ function jstDayWindowSec_(dateKey) {
   if (!Number.isFinite(startMs)) {
     return null;
   }
+  // Date.parse rolls a nonexistent day over to the next real
+  // one (2026-02-30 parses as 2026-03-02): a key that does not
+  // name the day it parsed to has no JST window.
+  if (jstDateKey_(startMs) !== dateKey) {
+    return null;
+  }
   const since = Math.floor(startMs / 1000);
   return { since: since, until: since + SNS_DAY_MS / 1000 - 1 };
 }

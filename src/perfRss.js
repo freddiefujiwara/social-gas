@@ -235,7 +235,10 @@ function perfSignedText_(delta) {
 // The first line of a caption or post text, truncated so a
 // section line stays readable.
 function perfFirstLine_(text, maxChars) {
-  const first = String(text == null ? '' : text).split('\n')[0].trim();
+  // historyTextOrNull_ is the total text coercion: a deformed
+  // cell whose toString is not a function reads as empty here
+  // instead of throwing its way out of the whole item.
+  const first = (historyTextOrNull_(text) || '').split('\n')[0].trim();
   const limit = maxChars || 30;
   return first.length > limit ? first.slice(0, limit) + '…' : first;
 }

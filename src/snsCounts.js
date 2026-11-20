@@ -149,6 +149,24 @@ function snsNumberOrNull_(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+// A value that arrived over the wire (an API response field)
+// as a number, or null when it did not arrive as one. Bare
+// Number() coercion is not used for this: it reads null / ''
+// / whitespace as 0, true as 1 and [5] as 5 — counts the
+// source never reported — and it throws on a value whose
+// toString is not a function (producible via JSON). Only
+// finite numbers and non-blank numeric strings count here.
+function apiNumberOrNull_(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+  }
+  return null;
+}
+
 // Default detail payload served by action=sns_detail before the
 // first collection: the full key set with null values, so the /ga
 // frontend can rely on the shape.
@@ -289,8 +307,7 @@ function fetchGraphFollowersCount_(url) {
       return null;
     }
     const data = JSON.parse(res.getContentText());
-    const count = Number(data && data.followers_count);
-    return Number.isFinite(count) ? count : null;
+    return apiNumberOrNull_(data && data.followers_count);
   } catch (err) {
     return null;
   }
@@ -378,8 +395,8 @@ function parseThreadsFollowersCount_(data) {
     return null;
   }
   for (let i = values.length - 1; i >= 0; i--) {
-    const value = Number(values[i] && values[i].value);
-    if (Number.isFinite(value)) {
+    const value = apiNumberOrNull_(values[i] && values[i].value);
+    if (value !== null) {
       return value;
     }
   }
@@ -387,4 +404,4 @@ function parseThreadsFollowersCount_(data) {
 }
 
 
-export { META_GRAPH_BASE, SNS_FACEBOOK_PAGE_ID, SNS_INSTAGRAM_MAIN_ID, SNS_INSTAGRAM_SUB_ID, SNS_SNAPSHOT_PROPERTY, SNS_THREADS_USER_ID, SNS_TOKEN_REFRESH_WINDOW_MS, SNS_YOUTUBE_CHANNEL_ID, THREADS_GRAPH_BASE, buildEmptySnsDetail_, buildSnsCountsResponse_, buildSnsDetailResponse_, fetchGraphFollowersCount_, fetchInstagramFollowers_, fetchThreadsFollowers_, getSnsCountsSnapshot_, parseThreadsFollowersCount_, snsNumberOrNull_, threadsFollowersInsightsUrl_, threadsToken_, threadsUserId_ };
+export { META_GRAPH_BASE, SNS_FACEBOOK_PAGE_ID, SNS_INSTAGRAM_MAIN_ID, SNS_INSTAGRAM_SUB_ID, SNS_SNAPSHOT_PROPERTY, SNS_THREADS_USER_ID, SNS_TOKEN_REFRESH_WINDOW_MS, SNS_YOUTUBE_CHANNEL_ID, THREADS_GRAPH_BASE, apiNumberOrNull_, buildEmptySnsDetail_, buildSnsCountsResponse_, buildSnsDetailResponse_, fetchGraphFollowersCount_, fetchInstagramFollowers_, fetchThreadsFollowers_, getSnsCountsSnapshot_, parseThreadsFollowersCount_, snsNumberOrNull_, threadsFollowersInsightsUrl_, threadsToken_, threadsUserId_ };
