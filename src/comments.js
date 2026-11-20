@@ -812,13 +812,18 @@ function fetchInstagramConversationMessages_(conversationId, pageId, pageToken) 
 // Unlike the comment halves there is no count to diff — a
 // conversation's message list is cheap to re-read and the
 // message-id upsert dedupes — so nothing depends on a
-// boundary the platform's numbers can outrun. The one
-// exception is the first-ever run: while the tab holds no
-// rows at all, only the last SNS_COMMENTS_BOUNDARY_GRACE_MS
-// of messages is imported, so enabling the feature does not
-// flood the feed with the inbox's history. Returns
-// { stored, error } like the other halves; failures are
-// summarized, never thrown.
+// boundary the platform's numbers can outrun. What does need
+// a baseline is a conversation the tab holds no rows for: it
+// may have sat outside the scanned window while its history
+// accumulated, so on first sight only its last
+// SNS_COMMENTS_BOUNDARY_GRACE_MS of messages is imported and
+// the rest becomes the baseline unread — a dormant
+// conversation resurfacing (say, because the owner wrote to
+// it) must not flood the feed with its past. Messages that
+// arrive afterwards are stored however old the conversation
+// is, and the first-ever run is just this rule applied to
+// every conversation at once. Returns { stored, error } like
+// the other halves; failures are summarized, never thrown.
 function collectInstagramDm_(spreadsheet, collectedAt) {
   const result = { stored: 0, error: null };
   const token = getScriptProperty_('META_ACCESS_TOKEN');
@@ -845,16 +850,19 @@ function collectInstagramDm_(spreadsheet, collectedAt) {
       SNS_HISTORY_IG_DM_COLUMNS
     ) || [];
   const storedIds = {};
+  const knownConversations = {};
   storedRows.forEach((row) => {
     const id = historyTextOrNull_(row.message_id);
     if (id) {
       storedIds[id] = true;
     }
+    const conversationId = historyTextOrNull_(row.conversation_id);
+    if (conversationId) {
+      knownConversations[conversationId] = true;
+    }
   });
-  const firstRun = storedRows.length === 0;
-  const firstRunSince = firstRun
-    ? Date.parse(collectedAt || '') - SNS_COMMENTS_BOUNDARY_GRACE_MS
-    : NaN;
+  const firstSeenSince =
+    Date.parse(collectedAt || '') - SNS_COMMENTS_BOUNDARY_GRACE_MS;
   const failures = [];
   const newRows = [];
   conversations.ids.forEach((conversationId) => {
@@ -867,13 +875,14 @@ function collectInstagramDm_(spreadsheet, collectedAt) {
       failures.push(fetched.error);
       return;
     }
+    const firstSeen = !knownConversations[conversationId];
     fetched.messages.forEach((message) => {
       if (storedIds[message.id]) {
         return;
       }
-      if (firstRun) {
+      if (firstSeen) {
         const at = Date.parse(message.posted_at || '');
-        if (!Number.isFinite(at) || at <= firstRunSince) {
+        if (!Number.isFinite(at) || at <= firstSeenSince) {
           return;
         }
       }
