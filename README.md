@@ -1,0 +1,149 @@
+# social-gas
+
+GA4 Data API ブリッジ＋SNS 集計。Google Apps Script の Web アプリが、所有者の Google アカウント権限で GA4 Data API（runReport）や各 SNS の API を叩き、結果を JSON で返す。
+
+Muse の API 接続の仕組みは OAuth の入口が単一ドメインのサービス専用で、ドメインが分かれる Google には使えないため、この GAS 経由の形にしている。
+
+データの流れは「1時間ごとの収集（collectSnsCounts）が履歴スプレッドシートに書き、画面の読み取りはシートから組み立てる」形に統一されている（第2段階）。/social の画面表示のために GA4 / Meta / YouTube の API をその場で叩くことはない。GA4 を直接叩くのは収集側と、公開アクション（music_count / top_articles、どちらも CacheService で約1時間キャッシュ）だけ。
+
+## エンドポイント
+
+本番: https://script.google.com/macros/s/AKfycbypis7IqAtM2u0_h7ysiZ5UgztUEwNYJ1zPMnr8IbTBXiyfiapfRMtD_9CxVpc5G8YVzQ/exec
+
+※ ANYONE_ANONYMOUS のため、URLを知っている人は誰でも集計を読める。公開物（ブログ・SNS・他のリポジトリ）に載せないこと。
+
+## 認証（Googleログイン＋一時アクセスリンク）
+
+他のアプリ（health・asset・tweet）と同じ方式。
+
+- スクリプトプロパティ：`GOOGLE_OAUTH_CLIENT_ID`（health と同じクライアント）と `AVAILABLE_GMAILS`（許可するメールアドレス、カンマ区切り）。両方が設定されている間だけ認証が有効になる
+- データ取得は、検証済み Google ID トークン（`id_token` パラメータまたは Authorization: Bearer）か、一時アクセスリンクの `share_token` パラメータのどちらかで通る
+- 一時アクセスリンク：ログイン状態で `action=issue_share`（ID トークン必須）を呼ぶと30日有効なトークンを発行。再発行で旧トークンは無効。`action=revoke_share` で即時無効化。フロントでは URL の `#share=` フラグメントで受け渡す（サーバーやリファラに残らない）
+- 保管：スクリプトプロパティに SHA-256 ハッシュ（SHARE_TOKEN_HASH）と有効期限（SHARE_EXPIRES_AT）のみ。生トークンは保存しない
+- エディタ用の補助：`issueShareToken` を実行するとログに発行済みURLが出る（初期発行用）
+
+## パラメータ
+
+デフォルトのレポート応答は、履歴スプレッドシートから組み立てて返す（第2段階）。対応する形は /social の画面が使う4形だけ：
+
+- 合計：`dimensions` 空（既定の metrics のまま）
+- 日次：`dimensions=date`、`metrics=screenPageViews`
+- ページランキング：`dimensions=pagePath`（既定）
+- 流入元ランキング：`dimensions=sessionDefaultChannelGroup`
+
+それ以外の寸法・metrics の組み合わせと、`filter` 付きのリクエストは `ok: false`（unsupported report parameters）を返す。応答の封筒（ok / property / startDate / endDate / metrics / dimensions / filters / offset / _share / data）は従来どおりで、data.rows は GA4 と同じ形（dimensionValues / metricValues）にシートの値から合成する。シートにデータがまだ無い場合は `ok: false`（blog data has not been collected into the history sheet yet）。数分間 CacheService にキャッシュする。
+
+- `start`（既定 28daysAgo）/ `end`（既定 today）：日付表現（YYYY-MM-DD も可）。日次形の窓として使う
+- `metrics`（既定 screenPageViews,activeUsers,sessions）：カンマ区切り
+- `dimensions`（既定 pagePath）：カンマ区切り。空にすると合計のみ
+- `limit`（既定 25）
+- `offset`（既定 0）：limit と組み合わせてページングする
+- `filter`：書式は検証するが、フィルタ付きレポートは提供しない（上記）
+- `action=music_count`：公開アクション。サイト共通ヘッダーに出す「川口の歌」の累計再生回数のため、認証なしで呼べる。返すのは music_play イベントの累計 eventCount（2026-11-08以降）と更新日時だけで、他のデータは一切返さない。CacheService で約1時間キャッシュし、GA4 Data API を叩く頻度を抑える
+- `action=comments_rss&source=instagram|threads&token=…`：/reader 向けに、履歴シートの `ig_comments` / `threads_replies` タブに貯めた「自分の投稿へのコメント・返信」を新しい順に最大50件、RSS 2.0 で返す。リクエスト時にプラットフォームの API は叩かない。コメント本文を含むため認証は必須で、スクリプトプロパティ `COMMENTS_RSS_TOKEN` と一致する `token` が無い・違う場合は何も返さない（プロパティ未設定の間は全リクエストを拒否するので、コードをデプロイしただけでは何も公開されない）。guid はプラットフォームのコメント／返信 ID そのもの、pubDate は RFC 822 形式
+
+## SNSフォロワー数（action=sns_counts）
+
+YouTube・Instagram・Threads のフォロワー数を GAS 自身が定期取得し、保存済みスナップショットだけを認証なしで返す。
+
+- 取得：`collectSnsCounts` を時間主導型トリガー（1時間ごと）で実行。トリガーはデプロイでは入らないため、エディタで `setupSnsTriggers` を1回実行して設置する
+- 保存先：スクリプトプロパティ `SNS_COUNTS_SNAPSHOT`（各SNSの数値＋取得日時 collected_at）
+- 読み取り：`?action=sns_counts`。返すのはスナップショットのみで、トークンや GA4 データは含まない
+- YouTube：高度なサービス（YouTube Data API v3）で登録者数を取得。GCP プロジェクト側で YouTube Data API v3 の有効化が必要
+- Instagram / Threads：スクリプトプロパティ `META_ACCESS_TOKEN`（Meta の長期ユーザートークン）で Graph API から取得。`META_APP_ID` / `META_APP_SECRET` を設定すると、期限が近づいたトークンを `fb_exchange_token` で自動延長する（有効期限は `META_TOKEN_EXPIRES_AT` に記録）
+- Threads 専用トークンを使う場合は `META_THREADS_ACCESS_TOKEN` を設定する（未設定なら `META_ACCESS_TOKEN` で代用）。その有効期限は `META_THREADS_TOKEN_EXPIRES_AT` に記録され、`th_refresh_token` で自動延長される
+- Threads 専用アプリ（ユースケース「Access the Threads API」）のトークンは、GAS 内で完結して取得できる。`THREADS_APP_ID`（Threads API の Settings 画面上部の Threads app ID。Meta のアプリIDとは別物）と `THREADS_APP_SECRET` をスクリプトプロパティに設定し、同じ Settings 画面の「Redirect Callback URLs」にこの Web アプリの /exec のURLを登録したうえで、エディタで `threadsAuthorizeUrl` を実行してログのURLから認可すると、コールバックが長期トークンを `META_THREADS_ACCESS_TOKEN` に保存する。認可で求めるスコープは `threads_basic,threads_manage_insights,threads_read_replies`（フォロワー数はプロフィールではなく `threads_insights` から取るためインサイト側の権限が要り、返信の取得には読み取り側の権限が要る）。スコープを広げたときは、自動更新では権限が増えないので認可をやり直すこと。取得日時が `THREADS_TOKEN_AT` に記録され、50日以上経つと `refreshThreadsTokenIfNeeded` が取得の前に自動更新する（失敗時はスナップショットの `threads.threads_error` に要約が入る）
+- トークン未設定・失効のサービスは null になり、他のサービスの取得は続く
+- Instagram の KPI（メインアカウントのみ、スナップショットの `instagram` 内）：`media_count`（投稿数、`instagram_basic` で取得可）、`views_30d`（過去30日の Views 合計）と `non_follower_pct`（そのうちフォロワー以外％、小数1桁）はインサイト由来で、`META_ACCESS_TOKEN` に `instagram_manage_insights` 権限が付くまでは null のまま（付与後は自動で数値が入る）。インサイト取得が失敗した場合は `instagram.insights_error` に API エラーの要約（HTTP ステータスと Graph API の code / subcode / message、秘密値は含まない）が入り、日別合計へのフォールバック時もその旨が記録される（成功時は null）
+- 公開用の射影には `reach_30d`（過去30日に届いたアカウント数）と `saves_30d`（過去30日の保存数、スナップショットの `interactions_30d.saves`）も含む（トップページのヒーロー表示用で、値は次節の詳細データと同じ保存値）
+- なお `action=sns_counts` が返すのは公開用の射影（上記のフォロワー数と KPI のみ）で、次節の詳細データは公開アクションには一切含まれない
+
+## SNS詳細（action=sns_detail、認証必須）
+
+/social 管理画面用。読み取りは `?action=sns_detail` で、レポートと同じ認証ゲート（ID トークンまたは一時アクセスリンク）を通る。
+
+**応答は履歴スプレッドシートから組み立てる**（第2段階）。`account` の最新行を中心に、`media` / `daily` / `threads_media` / `youtube_media` / `ig_demographics` / `threads_account` / `x_media` の各タブから、スナップショットと同形の詳細を再構築する（数分間 CacheService にキャッシュ）。シートが読めない・account に行が無い場合は、従来どおり保存済みスナップショットへフォールバックし、どちらも無ければ全項目 null の空形を返す。シート由来の応答では、収集1回ごとの診断であるエラーキー（`insights_error`、`detail_error`、`media_error` 等）は履歴に保存していないため常に null になり、`daily_follows` は値のある日だけの配列になる（両側 null の日は行自体が無い）。`youtube.recent_videos` の `url` はシートに保存せず video_id から組み立てる。
+
+以下は収集側（スナップショットと履歴シートへの書き込み）の仕様。取得は項目ごとに独立して失敗し、取れない項目は null、失敗の要約はセクションごとのエラーキー（秘密値は含まない）に入る。
+
+- Instagram アカウント全体（過去30日、メインアカウント）：`reach_30d`、`accounts_engaged_30d`、`interactions_30d`（total / likes / comments / shares / saves）、`profile_links_taps_30d`、`follows_30d` / `unfollows_30d`（`follows_and_unfollows` の follow_type 内訳）、`daily_follows`（日次フォロー／フォロー解除系列）。失敗時は `instagram.detail_error`（ただし `daily_follows` の失敗だけは `instagram.daily_follows_error` に分けて記録する）
+  - `daily_follows` は `{date, follows, unfollows}`（date は Asia/Tokyo の暦日 \"YYYY-MM-DD\"、日付昇順）の配列で、/social の Instagram タブで日ごとのフォロー・フォロー解除グラフに投稿日を重ねるための系列。投稿ごとのフォロー帰属は Meta のデータに存在しないため、日次系列と投稿日の重ね合わせで代替する。取得方式は2026-11-09 の本番デバッグで確定した：`follows_and_unfollows` は period=day の素の形が HTTP 400 で拒否され、`metric_type=total_value` 形は指定期間全体の合算（follow_type 内訳）しか返さないため、1回のリクエストでは日次系列は作れない。そこで過去30日の各日について、その日の JST ウィンドウ（00:00:00〜23:59:59 を Unix 秒に変換）で total_value＋breakdown=follow_type を取得し、1日ずつ組み立てる。当日分は途中経過の値で、次の収集で更新される。1日の取得が失敗したらその日は両側 null のまま残し、欠けた日数は `daily_follows_missing_days` に記録する（部分的失敗はエラーにしない）。全日失敗のときだけ系列を null にし、`daily_follows_error` に要約を入れる。ラベルが欠けた側は null（未報告）で、0 にはしない。実応答の形はエディタから `debugInstagramDailyFollows()` を手動実行して確認する
+  - `profile_links_taps_30d` は2段構え：まず total_value を取り、null または 0 のときは日別 values の30日合計で補完する。採用した形は `profile_links_taps_source`（`"total_value"` / `"daily_sum"`）に記録する（2026-11-09 の本番初回実行で total_value が実態と食い違う 0 を返したための対策）
+  - follows 内訳は、2026-11-09 の本番診断で確定した形で読む：`follows_and_unfollows` は `metric_type=total_value`＋`breakdown=follow_type` のときにだけ内訳が返り、ラベルは結果の状態を表す（`FOLLOWER`＝フォローした数 → `follows_30d`、`NON_FOLLOWER`＝フォローを外した数 → `unfollows_30d`）。照合はこの2ラベルの完全一致（大文字小文字は無視）を最優先とし、どちらにも一致しなかった場合は観測したラベル一覧が `instagram.detail_error` に `follows_and_unfollows labels: [...]` として記録される
+- Instagram フォロワー属性（lifetime）：`instagram.demographics` = `age_gender`（`{key, value}` の降順リスト、key は "25-34/F" 形式）、`top_cities` / `top_countries`（各上位10件）。失敗分は `instagram.detail_error` に合算
+- Instagram 投稿ごと（新しい順・最大30件）：`instagram.recent_media[]` = `{id, type, posted_at, caption（80字まで）, permalink, views, reach, likes, comments, shares, saves, avg_watch_sec, total_watch_sec, duration_sec}`。リールの視聴時間はミリ秒→秒に変換。メディア種別で使える metric が違うため、失敗時は metric を絞って再試行する。失敗時は `instagram.media_error`
+  - `duration_sec` は動画自体の長さ（秒、リール／動画のみ）。Graph API に長さのフィールドが無いため、MP4 の `mvhd` ボックス（timescale と duration）から読む。fragmented MP4 では mvhd の duration が 0 になるため、その場合は `mvex` 内の `mehd` ボックスの duration（mvhd の timescale 単位）にフォールバックする。収集時に media_url へ Range リクエスト（先頭512KB、無ければ末尾512KB）で取得し、解析する。長さは不変なので、media シートに保存済みの投稿は再取得せず引き継ぐ（取得は未測定の動画だけに限られ、UrlFetch の追加呼び出しは収集1回あたり新規動画の分だけ）。失敗した投稿は null のまま
+- YouTube：`youtube.total_views`（総再生数）と `youtube.video_count`（動画数）を追加。`youtube.recent_videos[]`（新しい順・最大10件）= `{id, title, published_at, views, likes, comments, url}`。失敗時は `youtube.youtube_error`
+- Threads アカウント全体（過去30日）：`threads.views_30d`、`threads.interactions_30d`（total / likes / replies / reposts / quotes）。`threads_insights` から metric ごとに取得し、total_value があればそれを、なければ日別 values の合計を読む（フォロワー数だけは現在値なので従来どおり別扱い）。失敗時は `threads.detail_error`
+- Threads 投稿ごと（新しい順・最大30件）：`threads.recent_posts[]` = `{id, type, posted_at, text（全文、上限2000字）, permalink, views, likes, replies, reposts, quotes}`。投稿一覧は本人の `threads` エッジ、数値は各投稿の media insights から。insights が取れない投稿（他人の投稿のリポスト等）は数値 null のまま残り、失敗件数は `threads.posts_error` に要約される
+- X（フォロワー数＋投稿ごと、新しい順・最大50件）：`x.followers`、`x.recent_posts[]` = `{id, posted_at, text（上限2000字）, url, views, likes, reposts, replies}`。**X の API キーは tweet-gas だけが持ち**、ここには置かない。収集のたびに tweet-gas の Web アプリへ `{ action: "sns_snapshot", sync_token }` を POST して数字だけを受け取る（alarm-gas と time-table-gas の同期と同じ機械間トークン方式）。こちら側のプロパティは `TWEET_GAS_EXEC_URL`（tweet-gas の /exec URL）と `TWEET_GAS_SYNC_TOKEN`（tweet-gas の `SYNC_TOKEN` と同じ値）。未設定なら X は全て null でエラーにもならない。通信自体の失敗は `x.x_error` と `x.posts_error` の両方に同じ要約が入り、tweet-gas 側の取得失敗は tweet-gas が返した `x_error` / `posts_error` をそのまま記録する。`url` はシートに保存せず post_id から組み立てる。ユーザー名（`x.username`）はスナップショットにだけ入り、シートには保存しない
+
+
+## SNS履歴（スプレッドシート）
+
+スナップショットは取得のたびに上書きされるため、推移を残す目的で `collectSnsCounts` が Google スプレッドシートにも書き込む。スクリプトプロパティ `SNS_HISTORY_SHEET_ID` にスプレッドシートの ID が設定されているときだけ動作し、未設定なら何もしない（ID はコードに書かない）。
+
+書き方はタブで2種類に分かれる。**投稿系と日次は「1キー1行の上書き（upsert）」で、account のみ時系列の追記**。
+
+- `account` シート（例外的に追記のまま）：取得ごとに1行を追記する。フォロワー推移グラフの元データなので、ここだけは収集の履歴そのものを残す。列は collected_at、ig_followers、ig_anemone_followers、threads_followers、youtube_subscribers、total_followers（Instagram メイン＋Threads＋YouTube＋X）、media_count、views_30d、non_follower_pct、reach_30d、accounts_engaged_30d、interactions_total / likes / comments / shares / saves、profile_links_taps_30d、profile_links_taps_source、follows_30d、unfollows_30d、yt_total_views、yt_video_count、x_followers。null の項目は空欄。x_followers は最後尾に追加した列で、既存シートのヘッダーに無くても位置で読み書きする（`sns_history` の読み取りはヘッダーに無い列を正規の位置で補う）
+- `media` シート（キー `media_id` で upsert）：`recent_media` の投稿ごとに1行。列は collected_at、media_id、posted_at、type、caption、permalink、views、reach、likes、comments、shares、saves、avg_watch_sec、total_watch_sec、thumbnail_url、duration_sec。thumbnail_url と duration_sec は最後尾に追加した列で、既存シートのヘッダーに無くても位置で読み書きする
+- `daily` シート（キー `date` で upsert）：Instagram の日次フォロー。列は date、follows、unfollows、collected_at。`daily_follows` は収集のたびに過去30日分が再取得されるため、date をキーに上書きし、30日より古い日も残り続ける。両側 null の日は行を作らず、既存行も消さない
+- `threads_media` シート（キー `post_id` で upsert）：`threads.recent_posts` の投稿ごとに1行。列は collected_at、post_id、posted_at、type、text、permalink、views、likes、replies、reposts、quotes
+- `youtube_media` シート（キー `video_id` で upsert）：`youtube.recent_videos` の動画ごとに1行。列は collected_at、video_id、published_at、title、views、likes、comments。動画ごとの数値はもともと毎回の収集でアップロード一覧から取得していた分（最大10件）で、履歴のために追加の取得はしていない
+- `ig_demographics` シート（キー `breakdown_key` で upsert）：Instagram のフォロワー属性。列は breakdown_key、breakdown、key、value、collected_at。breakdown は age_gender（年代×性別、key は `25-34/F` の形）、city（上位の市）、country（上位の国）の3種で、キーで1行にまとめる。取得に失敗した breakdown は行を作らず、既存行も消さない
+- `threads_account` シート（キー `metric` で upsert）：Threads のアカウント指標（過去30日）。列は metric、value、collected_at。metric は views_30d、interactions_total / likes / replies / reposts / quotes。数値が取れた metric だけ行を作る
+- `ig_comments` シート（キー `comment_id` で upsert）：自分の Instagram 投稿へのコメントと返信。列は comment_id、media_id、parent_comment_id、username、text、posted_at、like_count、permalink、collected_at。毎時の収集で `media` の comments 件数が前回より増えた投稿だけコメント一覧（返信を展開）を取りに行く。初回の取得では、それ以前からあったコメントでフィードが埋まらないよう、前回の収集がその投稿を観測した時刻より後に付いたものだけを入れる（2回目以降は保存済みの最古のコメントが境界になる）
+- `threads_replies` シート（キー `reply_id` で upsert）：自分の Threads 投稿への返信。列は reply_id、post_id、username、text、posted_at、permalink、collected_at。`threads_media` の replies 件数が増えた投稿だけ conversation を取りに行く。自分の返信は除く。境界の扱いは `ig_comments` と同じ
+- コメント系の2タブは、posted_at が60日より古い行を収集のたびに間引く（/reader 側の保持期間と一致）。取得には追加の認可が要る：Instagram は Meta トークンに `instagram_manage_comments`、Threads は `threads_read_replies`（認可スコープに含めて認可をやり直す）
+- `x_media` シート（キー `post_id` で upsert）：`x.recent_posts` の投稿ごとに1行。列は collected_at、post_id、posted_at、text、views、likes、reposts、replies。URL は保存せず、読み取り時に post_id から組み立てる
+- `blog_daily` シート（キー `date` で upsert）：ブログの日次 KPI を GA4 から取得して書く（スナップショット経由ではない）。列は date、views、users、sessions、avg_speed_ms、music_plays、collected_at。対象は表示窓の全日（28daysAgo〜today の29日）で、毎回の収集で窓全体を取り直して上書きする（GA4 側の後日修正も次の収集で反映される。当日分は途中経過）。avg_speed_ms は `wv_lcp` イベントの平均値（eventValue / eventCount、ミリ秒）で、表示スピードの指標。music_plays はその日の `music_play` イベント件数
+- `blog_posts` シート（キー `path` で upsert）：ブログの記事ごとに1行。列は path、title、views_28d、collected_at。path は `/<id>` と `/blog/<id>` を一本化した正規形 `/blog/<id>`（フロントのランキングと同じ合算ルール、記事IDの判定は `action=top_articles` と同じ）。views_28d は直近28日の表示回数、title は GA4 の pageTitle
+- `blog_pages` シート（キー `path` で upsert）：blog_posts と同じ取得を記事以外にも広げたもの。列は path、title、views_28d、collected_at。記事は正規形に合算し、それ以外のパス（トップやアプリのページ）はそのままのパスがキー。画面のページレンキング（記事とアプリページが混ざる）用
+- `blog_totals` シート（キー `window` で upsert）：表示窓の合計1行だけ。列は window（固定で `28d`）、views、users、sessions、collected_at。28日間のユーザー数は日次 users の単純合計と一致しない（期間内で重複排除される）ため、寸法なしレポートの合計をそのまま収集する
+- `blog_sources` シート（キー `channel` で upsert）：流入元ごとの表示回数。列は channel、views_28d、collected_at。channel は `sessionDefaultChannelGroup`
+- ブログの5タブは `SNS_HISTORY_SHEET_ID` と `GA4_PROPERTY_ID` の両方が設定されているときだけ書く。GA4 の取得に失敗したタブはスキップし、実行ログに1行出して収集自体は成功として扱う（SNS 側の書き込みとは独立）
+- upsert の方式：収集のたびにタブ全体を読み、キーでマージして（新しい取得値が勝つ。ただし新しい値が null の項目は空欄として扱い、既存値を残す＝null で潰さない）、ヘッダー＋1キー1行で書き戻し、余った行は削除する。この方式により、追記方式だった頃に貯まった `media` の重複行（30投稿×収集回数分）も、次回収集で自動的に1投稿1行へ整理される
+- どのシートも無ければ自動作成し、1行目が空（シートが空）のときだけヘッダー行を書く。既存のヘッダー行は upsert でも書き換えない
+- 書き込みに失敗しても取得自体は成功として扱い、実行ログに `SNS history append failed: <要約>` が1行出る（要約に秘密値・URL は含めない）
+- 読み取りは `?action=sns_history`（認証必須、sns_detail と同じゲート）で、/social の推移グラフ用。`account` シートの行を collected_at 昇順で最大直近2400行返し（1時間ごとの収集で約100日分）、項目は collected_at、ig_followers、threads_followers、youtube_subscribers、total_followers、media_count、views_30d、non_follower_pct、reach_30d、interactions_total、follows_30d、unfollows_30d、yt_total_views、x_followers の14項目に絞る（空欄は null）。プロパティ未設定・シートが無い／空の場合はエラーにせず `rows: []` を返す
+- 第2段階の読み取り：`action=sns_detail` とデフォルトのレポート応答もシートから組み立てる（詳細は各節）。`blog_pages` / `blog_sources` は「窓のスナップショット」なので、読み取りでは最新の collected_at のバッチの行だけを使う（古い窓の行の凍結した views_28d をランキングに出さないため）。`blog_daily` は日付キーで窓に絞る
+
+## 診断関数 `debugSnsInsights`（手動実行専用）
+
+詳細の数値が実態と食い違うときの切り分け用。エディタから手動実行すると、`follows_and_unfollows` と `profile_links_taps` について6つのリクエスト形（A：現行の breakdown=follow_type 形、B：breakdown なし、C：metric_type なし、D：現行の total_value 形、E：metric_type なし＋values の件数・合計、F：period=lifetime）の生応答を実行ログに出す（各応答は先頭3000文字まで、トークンは伏せる）。トリガーや doGet からは呼ばれず、スナップショットにも影響しない。2026-11-09 の本番切り分けで、breakdown=follow_type のラベルは結果の状態（FOLLOWER＝フォローした数、NON_FOLLOWER＝フォローを外した数）を表すことと、profile_links_taps は現行の両形とも 0 だったことが判明済みで、その原因確定のために使う。
+
+## 診断関数 `debugThreadsFollowers` / `debugThreadsPosts`（手動実行専用）
+
+Threads の数値が取れないときの切り分け用。`debugThreadsFollowers` はフォロワー数取得（`threads_insights` の `followers_count`）の生応答を、`debugThreadsPosts` は詳細取得の3リクエスト（アカウント指標の合算リクエスト、投稿一覧 limit 3、先頭投稿の media insights）の生応答と、本番パーサが読み取った値を実行ログに出す（トークンは伏せる）。どちらもトリガーや doGet からは呼ばれず、スナップショットにも影響しない。
+
+## 診断関数 `debugMediaDuration` / `debugMediaDurationMissing` / `debugMediaUrlMissing`（手動実行専用）
+
+動画の長さ（`duration_sec`）が取れない投稿の切り分け用。エディタから手動実行すると、対象メディア（引数に media_id を渡す。省略時は直近の動画を自動で選ぶ）の media_url へ Range リクエスト（先頭512KB・末尾512KB）を行い、各取得について HTTP ステータス、取得バイト数、`moov` / `mvhd` / `mvex` / `mehd` のバイトパターンの有無、読み取れた mvhd の timescale / duration（raw値）と mehd の duration（raw値）、パース結果を実行ログに出す。トリガーや doGet・収集からは呼ばれず、シートやスナップショットにも影響しない。media_url とトークンはログに出さない。
+
+`debugMediaDurationMissing` は「取れていない側」をまとめて見る版。引数なしで実行すると、media シートを収集と同じ読み方で読み、`duration_sec` が未測定の REELS / VIDEO を最大5件選び、1件ごとに `debugMediaDuration` と同じ診断項目を実行ログに出す（media_url はシートに無いため Graph API から取得する。1件が失敗しても残りは続行し、失敗内容もログに出す）。省略時の自動選択が測定済みの投稿を選んでしまう `debugMediaDuration` では未測定側の実物構造が分からないため、こちらを使う。こちらも手動実行専用で、トリガーや doGet・収集からは呼ばれない。
+
+`debugMediaUrlMissing` は、さらに手前の段階（media_url そのものが返ってこない問題）を見る版。2026-11-15 に本番で `debugMediaDurationMissing` を実行したところ、未測定の5件すべてが「media has no media_url to probe」で止まった。つまりパース以前に、Graph API から取得したメディアオブジェクトへ media_url が含まれていなかった。引数なしで実行すると未測定の REELS / VIDEO を最大5件選び、1件ごとに (1) 直近リストで得たオブジェクトの media_url の有無とキー名の一覧（値は出さない。ただし media_type / media_product_type / status の識別系フィールドの値だけは出す）、(2) id 直接取得（`GET /{media-id}`）を fields 指定なしと `fields=media_url,media_type,media_product_type` の2通りで試した結果（同じく有無とキー名の一覧）、(3) 直接取得で media_url が取れた場合はそれを `fetchMediaDurationSec_` に渡した結果（秒）を実行ログに出す。media_url の値そのものとトークンはログに出さない。こちらも手動実行専用で、トリガーや doGet・収集からは呼ばれない。
+
+## Setup
+
+- GCP プロジェクト：Google Analytics Data API 有効化済み。OAuth 同意画面は External / テストモード（テストユーザーは所有者アカウント）。Apps Script プロジェクト（本番・ステージングとも）にリンクする。
+- スクリプトプロパティ：`GA4_PROPERTY_ID` に freddiefujiwara.com の GA4 プロパティID を設定する。本番・ステージングの両プロジェクトに設定する。
+- スコープ：appsscript.json で指定（analytics.readonly、script.external_request、script.scriptapp、spreadsheets、youtube.readonly）。spreadsheets は SNS 履歴の書き込み用で、追加したプロジェクトでは初回実行時に再認可が要る場合がある。
+
+## 開発とデプロイ
+
+他の -gas リポジトリと同じ運用。
+
+- `npm test`：vitest（カバレッジ付き）
+- ソースは役割ごとのモジュールに分割（src/*.js、src/Code.js は全体を re-export する入口）。モジュール一覧と並び順は build.js の MODULES が正本
+- `npm run build`：src/*.js を連結して dist/Code.gs を生成し、appsscript.json を dist/ へコピー
+- CI（.github/workflows/node.yaml）：
+  - 全ブランチでテスト
+  - main 以外への push → ステージング用プロジェクトへデプロイ（Secrets: STAGING_SCRIPT_ID / STAGING_DEPLOYMENT_ID）
+  - main への push（PR マージ）→ 本番プロジェクトへデプロイ（Secrets: DEPLOYMENT_ID、.clasp.json の scriptId が本番）
+  - clasp の認証情報は Secret `CLASPRC_JSON`
+
+## 注意
+
+- GAS の認可は黙って失効することがある。/exec がエラーやサインイン画面を返したら、エディタで doGet を実行して同意をやり直す。
+- Drive 上の置き場所：本番プロジェクトは API フォルダ内（2026-11-06 にマイドライブ直下から移動）。ステージング用プロジェクト social-gas-staging も同日作成（Script ID: 1fHczPxzhetaG4QC2whqGfUGwMuOXWY9o3p-1dquqIcKuv7IatyGp7xiU）。GitHub リポジトリ freddiefujiwara/social-gas で管理し、PR（ブランチ push）→ ステージング、main マージ → 本番に CI デプロイされる。
