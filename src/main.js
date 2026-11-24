@@ -106,6 +106,80 @@ function appendSmokeRows_(spreadsheet, rows) {
   }
 }
 
+// --- Bootstrap bundle (stage 3) ---
+// action=bootstrap answers the /social screen's whole initial
+// load in one request: the six fixed blog report shapes, the
+// overview-scoped SNS detail and the SNS history — the eight
+// requests the screen used to fire in parallel, each paying
+// its own Apps Script invocation overhead. Every section value
+// is exactly the response the corresponding individual request
+// returns: the reports are assembled by running the screen's
+// own parameter shapes (the raw query values below, verbatim)
+// through parseRunParams_ / buildBlogReportResponse_, and the
+// detail and history through their own builders, so the bundle
+// reads as the eight responses stapled together. Failures stay
+// per-section the same way: a report whose data is not
+// collected yet carries its own ok:false inside its section,
+// and a section builder that throws is converted to the
+// { ok: false, error } shape its own request would have
+// returned from doGet's catch — a section never fails the
+// whole bundle. Only authentication fails the whole request,
+// exactly as for the individual endpoints, because the branch
+// sits behind the same gate in doGet. The sections assemble
+// from the same caches the individual endpoints read (the
+// report builders' per-shape cache, the detail / history
+// payload caches), so the bundle needs no cache of its own.
+// Screens that predate the bundle never call it, and every
+// individual endpoint is unchanged.
+const BOOTSTRAP_REPORT_REQUESTS_ = [
+  ['totals', { dimensions: '' }],
+  ['daily', { dimensions: 'date', metrics: 'screenPageViews', limit: '40' }],
+  ['pages', { limit: '250' }],
+  [
+    'speed',
+    {
+      dimensions: 'pagePath',
+      metrics:
+        'customEvent:render_ms,eventCount,customEvent:render_slow_count',
+      limit: '250',
+    },
+  ],
+  [
+    'scroll',
+    {
+      dimensions: 'pagePath,customEvent:percent_scrolled',
+      metrics: 'eventCount',
+      limit: '250',
+    },
+  ],
+  ['sources', { dimensions: 'sessionDefaultChannelGroup', limit: '8' }],
+];
+
+// One bootstrap section: the builder's response, or the
+// { ok: false, error } its own request would have returned
+// had the builder thrown there.
+function buildBootstrapSection_(build) {
+  try {
+    return build();
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+function buildBootstrapResponse_(shareSession) {
+  const response = { ok: true, action: 'bootstrap' };
+  BOOTSTRAP_REPORT_REQUESTS_.forEach(([key, rawParams]) => {
+    response[key] = buildBootstrapSection_(() =>
+      buildBlogReportResponse_(parseRunParams_(rawParams), shareSession)
+    );
+  });
+  response.detail = buildBootstrapSection_(() =>
+    buildSnsDetailResponse_('overview')
+  );
+  response.history = buildBootstrapSection_(() => buildSnsHistoryResponse_());
+  return response;
+}
+
 function doGet(e) {
   try {
     const parameter = (e && e.parameter) || {};
@@ -274,6 +348,13 @@ function doGet(e) {
     if (parameter.action === 'sns_history') {
       return jsonOut_(buildSnsHistoryResponse_());
     }
+    // The bootstrap bundle (see buildBootstrapResponse_ above):
+    // the screen's whole initial load in one request, behind
+    // the same gate, its sections identical to the individual
+    // responses.
+    if (parameter.action === 'bootstrap') {
+      return jsonOut_(buildBootstrapResponse_(shareSession));
+    }
     // The screen's blog reports are served from the history
     // sheet (stage 2): the GA4 Data API is no longer called to
     // render the screen. buildReportRequest_ / fetchReport_
@@ -287,4 +368,4 @@ function doGet(e) {
 }
 
 
-export { SMOKE_RECORDS_COLUMNS, appendSmokeRows_, doGet, doPost, recordSmoke_ };
+export { SMOKE_RECORDS_COLUMNS, appendSmokeRows_, buildBootstrapResponse_, doGet, doPost, recordSmoke_ };

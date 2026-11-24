@@ -833,6 +833,170 @@ describe('Sheet-backed read side (stage 2)', () => {
     });
   });
 
+  describe('bootstrap action (stage 3)', () => {
+    // Every tab the bundle reads: the SNS detail / history
+    // fixtures plus the six blog report tabs.
+    const bootstrapTabs = () =>
+      Object.assign(detailTabs(), {
+        blog_totals: [
+          Code.SNS_HISTORY_BLOG_TOTALS_COLUMNS,
+          ['28d', 4925, 241, 900, AT_NEW],
+        ],
+        blog_daily: [
+          Code.SNS_HISTORY_BLOG_DAILY_COLUMNS,
+          ['2026-10-11', 999, 90, 100, '', '', AT_OLD],
+          ['2026-10-12', 100, 40, 55, 2400, 7, AT_NEW],
+          ['2026-11-09', 30, 12, 15, 2500, '', AT_NEW],
+        ],
+        blog_pages: [
+          Code.SNS_HISTORY_BLOG_PAGES_COLUMNS,
+          ['/stale-page', '古い窓のページ', 9999, AT_OLD],
+          ['/blog/1abcdefghijklmnopqrstuvwx', '記事タイトル', 321, AT_NEW],
+          ['/', 'トップ', 123, AT_NEW],
+        ],
+        blog_sources: [
+          Code.SNS_HISTORY_BLOG_SOURCES_COLUMNS,
+          ['Direct', 300, AT_NEW],
+          ['Organic Search', 800, AT_NEW],
+        ],
+        blog_speed: [
+          Code.SNS_HISTORY_BLOG_SPEED_COLUMNS,
+          ['2026-11-08', '/blog/1abcdefghijklmnopqrstuvwx', '記事タイトル', 52500, 7, AT_NEW, 1],
+          ['2026-11-08', '/blog/2abcdefghijklmnopqrstuvwx', '', 9000, 3, AT_NEW, 0],
+        ],
+        blog_scroll: [
+          Code.SNS_HISTORY_BLOG_SCROLL_COLUMNS,
+          ['/blog/1abcdefghijklmnopqrstuvwx', 25, 15, 0, 4, AT_NEW],
+          ['/blog/2abcdefghijklmnopqrstuvwx', 3, 0, 0, 0, AT_NEW],
+        ],
+      });
+
+    const callDoGet = (parameter) => {
+      Code.doGet({ parameter });
+      return lastJson();
+    };
+
+    it('bundles the eight initial-load responses, each section identical to its own request', () => {
+      serveTabs(bootstrapTabs());
+      const token = testShareToken();
+      // The screen's own requests, verbatim: the six report
+      // parameter shapes, the overview-scoped detail and the
+      // history.
+      const individual = {
+        totals: callDoGet({ dimensions: '', share_token: token }),
+        daily: callDoGet({
+          dimensions: 'date',
+          metrics: 'screenPageViews',
+          limit: '40',
+          share_token: token,
+        }),
+        pages: callDoGet({ limit: '250', share_token: token }),
+        speed: callDoGet({
+          dimensions: 'pagePath',
+          metrics:
+            'customEvent:render_ms,eventCount,customEvent:render_slow_count',
+          limit: '250',
+          share_token: token,
+        }),
+        scroll: callDoGet({
+          dimensions: 'pagePath,customEvent:percent_scrolled',
+          metrics: 'eventCount',
+          limit: '250',
+          share_token: token,
+        }),
+        sources: callDoGet({
+          dimensions: 'sessionDefaultChannelGroup',
+          limit: '8',
+          share_token: token,
+        }),
+        detail: callDoGet({
+          action: 'sns_detail',
+          scope: 'overview',
+          share_token: token,
+        }),
+        history: callDoGet({ action: 'sns_history', share_token: token }),
+      };
+      for (const key of Object.keys(individual)) {
+        expect(individual[key].ok, key).toBe(true);
+      }
+      const bundle = callDoGet({ action: 'bootstrap', share_token: token });
+      expect(bundle.ok).toBe(true);
+      expect(bundle.action).toBe('bootstrap');
+      expect(Object.keys(bundle).sort()).toEqual([
+        'action',
+        'daily',
+        'detail',
+        'history',
+        'ok',
+        'pages',
+        'scroll',
+        'sources',
+        'speed',
+        'totals',
+      ]);
+      // The contract: a section is the individual response,
+      // byte for byte — the screen can consume the bundle
+      // exactly as it consumed the eight responses.
+      for (const key of Object.keys(individual)) {
+        expect(bundle[key], key).toEqual(individual[key]);
+      }
+      expect(global.UrlFetchApp.fetch).not.toHaveBeenCalled();
+    });
+
+    it('fails authentication exactly like an individual endpoint', () => {
+      serveTabs(bootstrapTabs());
+      const bundle = callDoGet({ action: 'bootstrap', share_token: 'bogus' });
+      const totals = callDoGet({ dimensions: '', share_token: 'bogus' });
+      expect(bundle).toEqual({
+        ok: false,
+        status: 401,
+        error: 'share session expired or invalid',
+      });
+      expect(bundle).toEqual(totals);
+    });
+
+    it('keeps uncollected reports failing inside their own sections', () => {
+      // No blog tabs at all: every report answers "not
+      // collected yet" on its own today, so inside the bundle
+      // the sections carry that failure while the SNS sections
+      // still serve.
+      serveTabs(detailTabs());
+      const bundle = callDoGet({
+        action: 'bootstrap',
+        share_token: testShareToken(),
+      });
+      expect(bundle.ok).toBe(true);
+      for (const key of ['totals', 'daily', 'pages', 'speed', 'scroll', 'sources']) {
+        expect(bundle[key].ok, key).toBe(false);
+        expect(bundle[key].error, key).toContain('has not been collected');
+      }
+      expect(bundle.detail.ok).toBe(true);
+      expect(bundle.detail.detail_scope).toBe('overview');
+      expect(bundle.detail.instagram.freddiefujiwara).toBe(2000);
+      expect(bundle.history.ok).toBe(true);
+      expect(bundle.history.rows.length).toBeGreaterThan(0);
+    });
+
+    it('keeps missing speed / scroll tabs failing inside their own sections only', () => {
+      const tabs = bootstrapTabs();
+      delete tabs.blog_speed;
+      delete tabs.blog_scroll;
+      serveTabs(tabs);
+      const bundle = callDoGet({
+        action: 'bootstrap',
+        share_token: testShareToken(),
+      });
+      expect(bundle.ok).toBe(true);
+      expect(bundle.speed.ok).toBe(false);
+      expect(bundle.scroll.ok).toBe(false);
+      for (const key of ['totals', 'daily', 'pages', 'sources']) {
+        expect(bundle[key].ok, key).toBe(true);
+      }
+      expect(bundle.detail.ok).toBe(true);
+      expect(bundle.history.ok).toBe(true);
+    });
+  });
+
   describe('read performance: chunked cache, bounded reads, precompute', () => {
     const installCache = () => {
       const cacheStore = new Map();
