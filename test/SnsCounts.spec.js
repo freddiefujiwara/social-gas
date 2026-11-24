@@ -2979,7 +2979,7 @@ describe('SNS follower counts', () => {
       );
     });
 
-    it('serves the overview scope with the heavy lists emptied', () => {
+    it('serves the overview scope with the top posts kept, trimmed', () => {
       store.GA4_PROPERTY_ID = '123456789';
       store.SNS_COUNTS_SNAPSHOT = JSON.stringify(detailSnapshot);
       Code.doGet({
@@ -2992,8 +2992,8 @@ describe('SNS follower counts', () => {
       const json = lastJson();
       expect(json.ok).toBe(true);
       expect(json.detail_scope).toBe('overview');
-      expect(json.youtube.recent_videos).toEqual([]);
-      expect(json.instagram.recent_media).toEqual([]);
+      expect(json.youtube.recent_videos).toEqual([{ title: '川口の歌' }]);
+      expect(json.instagram.recent_media).toEqual([{ views: 1000 }]);
       expect(json.instagram.reach_30d).toBe(5000);
       expect(json.instagram.demographics).toEqual(
         detailSnapshot.instagram.demographics
