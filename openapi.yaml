@@ -1,11 +1,21 @@
 openapi: 3.0.0
 info:
-  title: GA4 Data API Bridge
-  version: 1.0.0
-  description: Returns Google Analytics 4 runReport results as JSON, fetched with the owner's Google account via the GA4 Data API.
+  title: Social Data API (GA4 bridge + SNS counts)
+  version: 1.1.0
+  description: |
+    Google Apps Script Web App with two surfaces:
+
+    - With no `action` parameter, it runs a GA4 Data API runReport for
+      the property configured in the GA4_PROPERTY_ID Script Property
+      and returns the result as JSON (the parameters below).
+    - With an `action` parameter, it serves the SNS collection data
+      and account actions: bootstrap, sns_counts, sns_detail,
+      sns_history, top_articles, music_count, comments_rss, perf_rss,
+      record_smoke, exchange_session, issue_share, revoke_session,
+      revoke_share. The action shapes are documented in the README.
 servers:
-  - url: https://script.google.com/macros/s/AKfycbypis7IqAtM2u0_h7ysiZ5UgztUEwNYJ1zPMnr8IbTBXiyfiapfRMtD_9CxVpc5G8YVzQ
-    description: Production deployment of the Google Apps Script Web App.
+  - url: https://script.google.com/macros/s/<deployment-id>/exec
+    description: Google Apps Script web app deployment (replace with the actual deployment URL)
 paths:
   /exec:
     get:
@@ -14,6 +24,13 @@ paths:
         Runs a GA4 Data API runReport for the property configured in the
         GA4_PROPERTY_ID Script Property and returns the result as JSON.
       parameters:
+        - name: action
+          in: query
+          description: SNS/account action to perform. Omit for the GA4 report below.
+          required: false
+          schema:
+            type: string
+            enum: [bootstrap, sns_counts, sns_detail, sns_history, top_articles, music_count, comments_rss, perf_rss, record_smoke, exchange_session, issue_share, revoke_session, revoke_share]
         - name: start
           in: query
           description: Start date, a GA4 date expression (e.g. 28daysAgo) or YYYY-MM-DD.
