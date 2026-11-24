@@ -1,7 +1,7 @@
 // Collection-time read precompute and the hourly collection
 // entry points (collectSnsCounts / setupSnsTriggers).
 
-import { SNS_INSTAGRAM_MAIN_ID, SNS_INSTAGRAM_SUB_ID, SNS_SNAPSHOT_PROPERTY, fetchInstagramFollowers_, fetchThreadsFollowers_ } from './snsCounts.js';
+import { SNS_DETAIL_VARIANT_SCOPES, SNS_INSTAGRAM_MAIN_ID, SNS_INSTAGRAM_SUB_ID, SNS_SNAPSHOT_PROPERTY, fetchInstagramFollowers_, fetchThreadsFollowers_, shapeSnsDetail_, snsDetailCacheKey_ } from './snsCounts.js';
 import { fetchThreadsAccountDetail_, fetchThreadsRecentPosts_ } from './threadsDetail.js';
 import { fetchXDetail_ } from './xDetail.js';
 import { refreshMetaTokenIfNeeded_, refreshThreadsTokenIfNeeded, refreshThreadsTokenIfNeeded_ } from './threadsAuth.js';
@@ -41,6 +41,17 @@ function precomputeReadCaches_() {
         JSON.stringify(detail),
         SNS_DETAIL_CACHE_SECONDS
       );
+      // The scoped variants ride along: each is shaped from
+      // the same assembled detail and stored under its own
+      // key, so a tab's first scoped read is a cache hit too.
+      SNS_DETAIL_VARIANT_SCOPES.forEach((scope) => {
+        putCachedText_(
+          cache,
+          snsDetailCacheKey_(scope),
+          JSON.stringify(shapeSnsDetail_(detail, scope)),
+          SNS_DETAIL_CACHE_SECONDS
+        );
+      });
     }
   } catch (err) {
     console.log('SNS detail precompute failed: ' + err);

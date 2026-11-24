@@ -245,6 +245,97 @@ function buildEmptySnsDetail_() {
   };
 }
 
+// --- sns_detail scopes ---
+// The detail is the screen's largest payload (the recent
+// media / posts lists dominate it), and each tab needs only
+// part of it, so action=sns_detail accepts an optional scope:
+//   (no scope)   the full payload, exactly as before.
+//   overview     every platform section with its heavy
+//                per-post collections emptied (scalars kept),
+//                for the overview tab's headline numbers.
+//   instagram / threads / youtube / x
+//                only that platform's section, complete.
+// An unknown scope reads as no scope. Every variant carries
+// detail_scope at the top level (the full payload does not),
+// is cached under its own chunked-cache key, and is
+// precomputed at collection time alongside the full payload
+// (see precomputeReadCaches_), so a scoped read costs the
+// same cache hit as the full one. The shaping is pure: it
+// runs on the assembled detail (sheet-built or the snapshot
+// fallback) and never changes what the full payload holds.
+const SNS_DETAIL_VARIANT_SCOPES = [
+  'overview',
+  'instagram',
+  'threads',
+  'youtube',
+  'x',
+];
+
+// The per-post collections the overview scope empties, per
+// platform section. The X section's reactions are keyed by
+// the very posts recent_posts carries, so the map empties
+// with the list. Bounded daily aggregates (daily_follows,
+// api_daily_posts, demographics) are not per-post lists and
+// stay, like every scalar.
+const SNS_DETAIL_OVERVIEW_EMPTIED_FIELDS = {
+  youtube: ['recent_videos'],
+  instagram: ['recent_media'],
+  threads: ['recent_posts'],
+  x: ['recent_posts', 'unattributed_reactions', 'recent_follows'],
+};
+
+function normalizeSnsDetailScope_(scope) {
+  return SNS_DETAIL_VARIANT_SCOPES.indexOf(scope) >= 0 ? scope : null;
+}
+
+function snsDetailCacheKey_(scope) {
+  return scope ? SNS_DETAIL_CACHE_KEY + '_' + scope : SNS_DETAIL_CACHE_KEY;
+}
+
+function shapeSnsDetailOverviewSection_(platform, section) {
+  if (!section || typeof section !== 'object') {
+    return section;
+  }
+  const shaped = Object.assign({}, section);
+  (SNS_DETAIL_OVERVIEW_EMPTIED_FIELDS[platform] || []).forEach((field) => {
+    if (Object.prototype.hasOwnProperty.call(shaped, field)) {
+      shaped[field] = [];
+    }
+  });
+  if (
+    platform === 'x' &&
+    Object.prototype.hasOwnProperty.call(shaped, 'reactions')
+  ) {
+    shaped.reactions = {};
+  }
+  return shaped;
+}
+
+// The scoped view of an assembled detail. scope is a
+// normalized scope (see normalizeSnsDetailScope_); null
+// returns the detail itself, untouched.
+function shapeSnsDetail_(detail, scope) {
+  if (!detail || !scope) {
+    return detail;
+  }
+  if (scope === 'overview') {
+    return {
+      collected_at: detail.collected_at,
+      detail_scope: 'overview',
+      youtube: shapeSnsDetailOverviewSection_('youtube', detail.youtube),
+      instagram: shapeSnsDetailOverviewSection_(
+        'instagram',
+        detail.instagram
+      ),
+      threads: shapeSnsDetailOverviewSection_('threads', detail.threads),
+      x: shapeSnsDetailOverviewSection_('x', detail.x),
+    };
+  }
+  const shaped = { collected_at: detail.collected_at, detail_scope: scope };
+  shaped[scope] = detail[scope];
+  return shaped;
+}
+
 // action=sns_detail (authenticated): the detail for the
 // /social admin screen, assembled from the history spreadsheet
 // (stage 2: the screen's reads come from the sheet, never from
@@ -254,11 +345,16 @@ function buildEmptySnsDetail_() {
 // exactly as before, and before the first collection the empty
 // shape above is served. The assembled detail is cached for
 // an hour — and the hourly collection precomputes it — so
-// repeated screen loads do not re-read every tab.
-function buildSnsDetailResponse_() {
+// repeated screen loads do not re-read every tab. The optional
+// scope (see the scopes section above) shapes the payload
+// after assembly; the full payload is served when it is
+// absent or unknown.
+function buildSnsDetailResponse_(scope) {
+  const normalizedScope = normalizeSnsDetailScope_(scope);
   const cache = sheetReadCache_();
+  const cacheKey = snsDetailCacheKey_(normalizedScope);
   if (cache) {
-    const hit = getCachedText_(cache, SNS_DETAIL_CACHE_KEY);
+    const hit = getCachedText_(cache, cacheKey);
     if (hit) {
       try {
         return Object.assign(
@@ -286,18 +382,19 @@ function buildSnsDetailResponse_() {
   if (!detail) {
     detail = getSnsCountsSnapshot_() || buildEmptySnsDetail_();
   }
+  const shaped = shapeSnsDetail_(detail, normalizedScope);
   if (cache) {
     // Stored chunked (see putCachedText_): a detail past the
     // per-value cap is cached too, instead of going uncached
     // as it did when the whole JSON had to fit one value.
     putCachedText_(
       cache,
-      SNS_DETAIL_CACHE_KEY,
-      JSON.stringify(detail),
+      cacheKey,
+      JSON.stringify(shaped),
       SNS_DETAIL_CACHE_SECONDS
     );
   }
-  return Object.assign({ ok: true, action: 'sns_detail' }, detail);
+  return Object.assign({ ok: true, action: 'sns_detail' }, shaped);
 }
 
 function fetchGraphFollowersCount_(url) {
@@ -404,4 +501,4 @@ function parseThreadsFollowersCount_(data) {
 }
 
 
-export { META_GRAPH_BASE, SNS_FACEBOOK_PAGE_ID, SNS_INSTAGRAM_MAIN_ID, SNS_INSTAGRAM_SUB_ID, SNS_SNAPSHOT_PROPERTY, SNS_THREADS_USER_ID, SNS_TOKEN_REFRESH_WINDOW_MS, SNS_YOUTUBE_CHANNEL_ID, THREADS_GRAPH_BASE, apiNumberOrNull_, buildEmptySnsDetail_, buildSnsCountsResponse_, buildSnsDetailResponse_, fetchGraphFollowersCount_, fetchInstagramFollowers_, fetchThreadsFollowers_, getSnsCountsSnapshot_, parseThreadsFollowersCount_, snsNumberOrNull_, threadsFollowersInsightsUrl_, threadsToken_, threadsUserId_ };
+export { META_GRAPH_BASE, SNS_DETAIL_VARIANT_SCOPES, SNS_FACEBOOK_PAGE_ID, SNS_INSTAGRAM_MAIN_ID, SNS_INSTAGRAM_SUB_ID, SNS_SNAPSHOT_PROPERTY, SNS_THREADS_USER_ID, SNS_TOKEN_REFRESH_WINDOW_MS, SNS_YOUTUBE_CHANNEL_ID, THREADS_GRAPH_BASE, apiNumberOrNull_, buildEmptySnsDetail_, buildSnsCountsResponse_, buildSnsDetailResponse_, fetchGraphFollowersCount_, fetchInstagramFollowers_, fetchThreadsFollowers_, getSnsCountsSnapshot_, normalizeSnsDetailScope_, parseThreadsFollowersCount_, shapeSnsDetail_, snsDetailCacheKey_, snsNumberOrNull_, threadsFollowersInsightsUrl_, threadsToken_, threadsUserId_ };

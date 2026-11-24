@@ -262,9 +262,12 @@ function doGet(e) {
     // The SNS detail snapshot sits behind the same gate as the GA4
     // report (ID token or share token): it carries per-post numbers
     // and follower demographics that the public sns_counts action
-    // deliberately never returns.
+    // deliberately never returns. The optional scope parameter
+    // narrows the payload to one tab's needs (see the scopes
+    // section of snsCounts.js); absent or unknown scopes serve
+    // the full payload, so older screens are unaffected.
     if (parameter.action === 'sns_detail') {
-      return jsonOut_(buildSnsDetailResponse_());
+      return jsonOut_(buildSnsDetailResponse_(parameter.scope));
     }
     // The history rows behind the trend charts sit behind the same
     // gate: they are the same numbers as sns_detail, only older.
