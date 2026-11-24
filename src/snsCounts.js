@@ -251,8 +251,11 @@ function buildEmptySnsDetail_() {
 // part of it, so action=sns_detail accepts an optional scope:
 //   (no scope)   the full payload, exactly as before.
 //   overview     every platform section with its heavy
-//                per-post collections emptied (scalars kept),
-//                for the overview tab's headline numbers.
+//                per-post collections reduced (scalars kept),
+//                for the overview tab: each channel's recent
+//                list keeps only its top posts, trimmed (see
+//                SNS_DETAIL_OVERVIEW_TOP_POSTS below), and
+//                the X reaction collections empty.
 //   instagram / threads / youtube / x
 //                only that platform's section, complete.
 // An unknown scope reads as no scope. Every variant carries
@@ -278,11 +281,102 @@ const SNS_DETAIL_VARIANT_SCOPES = [
 // api_daily_posts, demographics) are not per-post lists and
 // stay, like every scalar.
 const SNS_DETAIL_OVERVIEW_EMPTIED_FIELDS = {
-  youtube: ['recent_videos'],
-  instagram: ['recent_media'],
-  threads: ['recent_posts'],
-  x: ['recent_posts', 'unattributed_reactions', 'recent_follows'],
+  x: ['unattributed_reactions', 'recent_follows'],
 };
+
+// The overview tab's per-channel top lists (the frontend's
+// topPostsByChannel, src/api.js of the social frontend) rank
+// each channel's recent items by views and show the top 3,
+// so the overview scope keeps exactly those three per list
+// instead of emptying the lists: the same ranking the screen
+// applies (its sortMedia by "views", descending), each item
+// trimmed to the fields that ranking and its renderer read
+// (the caption / title head, the link, the view count, and
+// Instagram's media type, the label fallback when a caption
+// is empty). The platform scopes and the full payload keep
+// the complete lists, so a channel tab never reads these.
+const SNS_DETAIL_OVERVIEW_TOP_LIMIT = 3;
+const SNS_DETAIL_OVERVIEW_TOP_POSTS = {
+  youtube: {
+    field: 'recent_videos',
+    itemFields: ['title', 'url', 'views'],
+  },
+  instagram: {
+    field: 'recent_media',
+    itemFields: ['caption', 'type', 'permalink', 'views'],
+  },
+  threads: {
+    field: 'recent_posts',
+    itemFields: ['text', 'permalink', 'views'],
+  },
+  x: {
+    field: 'recent_posts',
+    itemFields: ['text', 'url', 'views'],
+  },
+};
+
+// A view count the frontend's sortMedia treats as missing:
+// null, undefined or a non-finite number. A missing count
+// sinks below every present one, whichever the direction.
+function snsDetailOverviewViewsMissing_(value) {
+  return (
+    value === null ||
+    value === undefined ||
+    (typeof value === 'number' && !Number.isFinite(value))
+  );
+}
+
+// The frontend's sortMedia comparator for "views",
+// descending: missing counts sink, two numbers compare
+// numerically, anything else compares as strings.
+// Array.prototype.sort is stable, so equal counts keep the
+// collected (newest-first) order — the overview's top 3 are
+// the same items the screen picks from the full payload.
+function compareSnsDetailOverviewViewsDesc_(a, b) {
+  const av = a ? a.views : null;
+  const bv = b ? b.views : null;
+  const aMissing = snsDetailOverviewViewsMissing_(av);
+  const bMissing = snsDetailOverviewViewsMissing_(bv);
+  if (aMissing && bMissing) {
+    return 0;
+  }
+  if (aMissing) {
+    return 1;
+  }
+  if (bMissing) {
+    return -1;
+  }
+  const cmp =
+    typeof av === 'number' && typeof bv === 'number'
+      ? av - bv
+      : String(av).localeCompare(String(bv));
+  return -cmp;
+}
+
+// One channel's overview list: the top items by views (see
+// compareSnsDetailOverviewViewsDesc_), each trimmed to the
+// given fields. A value that is not a list reads as an empty
+// one, like the frontend's listOf.
+function snsDetailOverviewTopItems_(items, itemFields) {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+  return items
+    .slice()
+    .sort(compareSnsDetailOverviewViewsDesc_)
+    .slice(0, SNS_DETAIL_OVERVIEW_TOP_LIMIT)
+    .map((item) => {
+      const trimmed = {};
+      if (item && typeof item === 'object') {
+        itemFields.forEach((field) => {
+          if (Object.prototype.hasOwnProperty.call(item, field)) {
+            trimmed[field] = item[field];
+          }
+        });
+      }
+      return trimmed;
+    });
+}
 
 function normalizeSnsDetailScope_(scope) {
   return SNS_DETAIL_VARIANT_SCOPES.indexOf(scope) >= 0 ? scope : null;
@@ -302,6 +396,16 @@ function shapeSnsDetailOverviewSection_(platform, section) {
       shaped[field] = [];
     }
   });
+  const topPosts = SNS_DETAIL_OVERVIEW_TOP_POSTS[platform];
+  if (
+    topPosts &&
+    Object.prototype.hasOwnProperty.call(shaped, topPosts.field)
+  ) {
+    shaped[topPosts.field] = snsDetailOverviewTopItems_(
+      shaped[topPosts.field],
+      topPosts.itemFields
+    );
+  }
   if (
     platform === 'x' &&
     Object.prototype.hasOwnProperty.call(shaped, 'reactions')
@@ -501,4 +605,4 @@ function parseThreadsFollowersCount_(data) {
 }
 
 
-export { META_GRAPH_BASE, SNS_DETAIL_VARIANT_SCOPES, SNS_FACEBOOK_PAGE_ID, SNS_INSTAGRAM_MAIN_ID, SNS_INSTAGRAM_SUB_ID, SNS_SNAPSHOT_PROPERTY, SNS_THREADS_USER_ID, SNS_TOKEN_REFRESH_WINDOW_MS, SNS_YOUTUBE_CHANNEL_ID, THREADS_GRAPH_BASE, apiNumberOrNull_, buildEmptySnsDetail_, buildSnsCountsResponse_, buildSnsDetailResponse_, fetchGraphFollowersCount_, fetchInstagramFollowers_, fetchThreadsFollowers_, getSnsCountsSnapshot_, normalizeSnsDetailScope_, parseThreadsFollowersCount_, shapeSnsDetail_, snsDetailCacheKey_, snsNumberOrNull_, threadsFollowersInsightsUrl_, threadsToken_, threadsUserId_ };
+export { META_GRAPH_BASE, SNS_DETAIL_VARIANT_SCOPES, SNS_FACEBOOK_PAGE_ID, SNS_INSTAGRAM_MAIN_ID, SNS_INSTAGRAM_SUB_ID, SNS_SNAPSHOT_PROPERTY, SNS_THREADS_USER_ID, SNS_TOKEN_REFRESH_WINDOW_MS, SNS_YOUTUBE_CHANNEL_ID, THREADS_GRAPH_BASE, apiNumberOrNull_, buildEmptySnsDetail_, buildSnsCountsResponse_, buildSnsDetailResponse_, compareSnsDetailOverviewViewsDesc_, fetchGraphFollowersCount_, fetchInstagramFollowers_, fetchThreadsFollowers_, getSnsCountsSnapshot_, normalizeSnsDetailScope_, parseThreadsFollowersCount_, shapeSnsDetail_, snsDetailCacheKey_, snsDetailOverviewTopItems_, snsNumberOrNull_, threadsFollowersInsightsUrl_, threadsToken_, threadsUserId_ };

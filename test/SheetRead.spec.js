@@ -1016,7 +1016,22 @@ describe('Sheet-backed read side (stage 2)', () => {
         subscribers: 10,
         total_views: 3599,
         video_count: 7,
-        recent_videos: [{ id: 'vid-1' }, { id: 'vid-2' }],
+        recent_videos: [
+          {
+            id: 'vid-1',
+            title: '動画1',
+            url: 'https://www.youtube.com/watch?v=vid-1',
+            views: 300,
+            likes: 9,
+          },
+          {
+            id: 'vid-2',
+            title: '動画2',
+            url: 'https://www.youtube.com/watch?v=vid-2',
+            views: 900,
+            likes: 3,
+          },
+        ],
         youtube_error: null,
       },
       instagram: {
@@ -1048,7 +1063,24 @@ describe('Sheet-backed read side (stage 2)', () => {
           top_countries: [{ key: 'JP', value: 1900 }],
         },
         detail_error: null,
-        recent_media: [{ id: 'media-1' }, { id: 'media-2' }],
+        recent_media: [
+          {
+            id: 'media-1',
+            type: 'REELS',
+            caption: '投稿1',
+            permalink: 'https://www.instagram.com/reel/M1/',
+            views: 500,
+            likes: 40,
+          },
+          {
+            id: 'media-2',
+            type: 'IMAGE',
+            caption: '投稿2',
+            permalink: 'https://www.instagram.com/p/M2/',
+            views: 1500,
+            likes: 90,
+          },
+        ],
         media_error: null,
       },
       threads: {
@@ -1063,7 +1095,15 @@ describe('Sheet-backed read side (stage 2)', () => {
           quotes: 0,
         },
         detail_error: null,
-        recent_posts: [{ id: 'post-1' }],
+        recent_posts: [
+          {
+            id: 'post-1',
+            text: 'スレッズ投稿',
+            permalink: 'https://www.threads.net/@freddiefujiwara/post/P1',
+            views: 700,
+            likes: 12,
+          },
+        ],
         posts_error: null,
       },
       x: {
@@ -1073,7 +1113,15 @@ describe('Sheet-backed read side (stage 2)', () => {
         api_daily_posts: [{ date: '2026-11-08', tweets_consumed: 12 }],
         usage_error: null,
         x_error: null,
-        recent_posts: [{ id: 'tw-1' }],
+        recent_posts: [
+          {
+            id: 'tw-1',
+            text: 'ポスト',
+            url: 'https://x.com/i/web/status/tw-1',
+            views: 250,
+            likes: 5,
+          },
+        ],
         posts_error: null,
         reactions: { 'tw-1': [{ kind: 'like', actor_username: 'someone' }] },
         unattributed_reactions: [{ kind: 'reply', actor_username: 'other' }],
@@ -1106,17 +1154,56 @@ describe('Sheet-backed read side (stage 2)', () => {
       expect(Code.normalizeSnsDetailScope_('x')).toBe('x');
     });
 
-    it('overview empties the heavy collections and keeps every scalar', () => {
+    it('overview keeps the top posts, trimmed, and every scalar', () => {
       const snapshot = scopedSnapshot();
       store.SNS_COUNTS_SNAPSHOT = JSON.stringify(snapshot);
       const response = Code.buildSnsDetailResponse_('overview');
       expect(response.ok).toBe(true);
       expect(response.detail_scope).toBe('overview');
       expect(response.collected_at).toBe(AT_NEW);
-      expect(response.youtube.recent_videos).toEqual([]);
-      expect(response.instagram.recent_media).toEqual([]);
-      expect(response.threads.recent_posts).toEqual([]);
-      expect(response.x.recent_posts).toEqual([]);
+      // Each channel's list keeps its most-viewed items (the
+      // fixture holds two or fewer per channel), most views
+      // first, trimmed to the fields the top lists read.
+      expect(response.youtube.recent_videos).toEqual([
+        {
+          title: '動画2',
+          url: 'https://www.youtube.com/watch?v=vid-2',
+          views: 900,
+        },
+        {
+          title: '動画1',
+          url: 'https://www.youtube.com/watch?v=vid-1',
+          views: 300,
+        },
+      ]);
+      expect(response.instagram.recent_media).toEqual([
+        {
+          caption: '投稿2',
+          type: 'IMAGE',
+          permalink: 'https://www.instagram.com/p/M2/',
+          views: 1500,
+        },
+        {
+          caption: '投稿1',
+          type: 'REELS',
+          permalink: 'https://www.instagram.com/reel/M1/',
+          views: 500,
+        },
+      ]);
+      expect(response.threads.recent_posts).toEqual([
+        {
+          text: 'スレッズ投稿',
+          permalink: 'https://www.threads.net/@freddiefujiwara/post/P1',
+          views: 700,
+        },
+      ]);
+      expect(response.x.recent_posts).toEqual([
+        {
+          text: 'ポスト',
+          url: 'https://x.com/i/web/status/tw-1',
+          views: 250,
+        },
+      ]);
       expect(response.x.unattributed_reactions).toEqual([]);
       expect(response.x.recent_follows).toEqual([]);
       expect(response.x.reactions).toEqual({});
@@ -1136,6 +1223,135 @@ describe('Sheet-backed read side (stage 2)', () => {
       expect(response.x.api_daily_posts).toEqual(snapshot.x.api_daily_posts);
       expect(response.threads.views_30d).toBe(53558);
       expect(response.youtube.subscribers).toBe(10);
+    });
+
+    it('overview picks the top 3 by views, missing counts sinking, ties in collected order', () => {
+      const snapshot = scopedSnapshot();
+      snapshot.instagram.recent_media = [
+        {
+          id: 'm1',
+          type: 'REELS',
+          caption: 'c1',
+          permalink: 'https://example.com/1',
+          views: 100,
+          likes: 1,
+        },
+        {
+          id: 'm2',
+          type: 'REELS',
+          caption: 'c2',
+          permalink: 'https://example.com/2',
+          views: null,
+          likes: 2,
+        },
+        {
+          id: 'm3',
+          type: 'REELS',
+          caption: 'c3',
+          permalink: 'https://example.com/3',
+          views: 5000,
+          likes: 3,
+        },
+        {
+          id: 'm4',
+          type: 'REELS',
+          caption: 'c4',
+          permalink: 'https://example.com/4',
+          views: 5000,
+          likes: 4,
+        },
+        {
+          id: 'm5',
+          type: 'REELS',
+          caption: 'c5',
+          permalink: 'https://example.com/5',
+          views: 30,
+          likes: 5,
+        },
+      ];
+      store.SNS_COUNTS_SNAPSHOT = JSON.stringify(snapshot);
+      const response = Code.buildSnsDetailResponse_('overview');
+      // The two 5000-view items keep their collected order,
+      // the null-view item sinks below every counted one and
+      // falls out of the top 3 with the 30-view item.
+      expect(response.instagram.recent_media).toEqual([
+        {
+          caption: 'c3',
+          type: 'REELS',
+          permalink: 'https://example.com/3',
+          views: 5000,
+        },
+        {
+          caption: 'c4',
+          type: 'REELS',
+          permalink: 'https://example.com/4',
+          views: 5000,
+        },
+        {
+          caption: 'c1',
+          type: 'REELS',
+          permalink: 'https://example.com/1',
+          views: 100,
+        },
+      ]);
+    });
+
+    it('overview top items carry only the fields the top lists read', () => {
+      const items = Code.snsDetailOverviewTopItems_(
+        [
+          {
+            caption: 'c',
+            type: 'REELS',
+            permalink: 'https://example.com/1',
+            views: 10,
+            id: 'drop-me',
+            likes: 99,
+            thumbnail_url: 'https://example.com/t.jpg',
+          },
+          { caption: 'no link', type: 'IMAGE', views: 5 },
+        ],
+        ['caption', 'type', 'permalink', 'views']
+      );
+      expect(items).toEqual([
+        {
+          caption: 'c',
+          type: 'REELS',
+          permalink: 'https://example.com/1',
+          views: 10,
+        },
+        { caption: 'no link', type: 'IMAGE', views: 5 },
+      ]);
+      expect('permalink' in items[1]).toBe(false);
+    });
+
+    it('overview top items keep every item when fewer than three, and empty stays empty', () => {
+      expect(
+        Code.snsDetailOverviewTopItems_(
+          [
+            { text: 'a', url: 'https://example.com/a', views: 1 },
+            { text: 'b', url: 'https://example.com/b', views: 2 },
+          ],
+          ['text', 'url', 'views']
+        )
+      ).toEqual([
+        { text: 'b', url: 'https://example.com/b', views: 2 },
+        { text: 'a', url: 'https://example.com/a', views: 1 },
+      ]);
+      expect(Code.snsDetailOverviewTopItems_([], ['views'])).toEqual([]);
+      expect(Code.snsDetailOverviewTopItems_(null, ['views'])).toEqual([]);
+    });
+
+    it('the overview views comparator sinks missing counts like the frontend sortMedia', () => {
+      const cmp = Code.compareSnsDetailOverviewViewsDesc_;
+      expect(cmp({ views: null }, { views: 0 })).toBeGreaterThan(0);
+      expect(cmp({ views: 0 }, { views: null })).toBeLessThan(0);
+      expect(cmp({ views: null }, { views: undefined })).toBe(0);
+      expect(cmp({ views: 5 }, { views: 9 })).toBeGreaterThan(0);
+      expect(cmp({ views: 9 }, { views: 5 })).toBeLessThan(0);
+      // Equal counts compare as zero (the comparator returns
+      // -0 for them, like the frontend's cmp * sign; sort
+      // treats the two zeroes alike).
+      expect(cmp({ views: 9 }, { views: 9 }) === 0).toBe(true);
     });
 
     it('does not mutate the full payload when shaping a scope', () => {
@@ -1208,9 +1424,39 @@ describe('Sheet-backed read side (stage 2)', () => {
       expect(full.instagram.recent_media).toHaveLength(2);
       const overview = Code.buildSnsDetailResponse_('overview');
       expect(overview.detail_scope).toBe('overview');
-      expect(overview.instagram.recent_media).toEqual([]);
-      expect(overview.threads.recent_posts).toEqual([]);
-      expect(overview.youtube.recent_videos).toEqual([]);
+      expect(overview.instagram.recent_media).toEqual([
+        {
+          caption: '新しい投稿',
+          type: 'REELS',
+          permalink: 'https://www.instagram.com/reel/NEW/',
+          views: 1000,
+        },
+        {
+          caption: '古い投稿',
+          type: 'FEED',
+          permalink: 'https://www.instagram.com/p/OLD/',
+          views: 100,
+        },
+      ]);
+      expect(overview.threads.recent_posts).toEqual([
+        {
+          text: 'スレッズ投稿',
+          permalink: 'https://www.threads.net/@freddiefujiwara/post/XYZ/',
+          views: 100,
+        },
+      ]);
+      expect(overview.youtube.recent_videos).toEqual([
+        {
+          title: '新しい動画',
+          url: 'https://www.youtube.com/watch?v=vid-new',
+          views: 500,
+        },
+        {
+          title: '前の動画',
+          url: 'https://www.youtube.com/watch?v=vid-old',
+          views: 300,
+        },
+      ]);
       expect(overview.instagram.freddiefujiwara).toBe(2000);
       const instagram = Code.buildSnsDetailResponse_('instagram');
       expect(instagram.instagram.recent_media).toHaveLength(2);
