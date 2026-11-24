@@ -1,12 +1,13 @@
 // SNS snapshot history, read side (action=sns_history).
 
 import { SNS_HISTORY_ACCOUNT_COLUMNS } from './historyWrite.js';
+import { SNS_DAY_MS, jstDateKey_ } from './instagramDaily.js';
 import { SNS_HISTORY_CACHE_KEY, SNS_HISTORY_CACHE_SECONDS, getCachedText_, openHistorySpreadsheet_, putCachedText_, sheetReadCache_ } from './sheetRead.js';
 
 // --- SNS snapshot history, read side (action=sns_history) ---
 // The authenticated counterpart of the append above: the /ga
 // trend charts read the "account" sheet back through this action.
-// Only the columns the charts need are served, and the response is
+// Only the columns the charts need are served, and the read is
 // capped at the newest 6600 rows (about 275 days at hourly
 // collections). The window is sized by what the front asks for:
 // the Instagram trend's longest period is 180 days, and its
@@ -17,6 +18,17 @@ import { SNS_HISTORY_CACHE_KEY, SNS_HISTORY_CACHE_SECONDS, getCachedText_, openH
 // cache chunk cap below sits at 120. An unset property or a
 // missing/empty sheet is not an error: the history simply has
 // not started yet, so rows is [].
+//
+// The served rows are downsampled (see
+// downsampleSnsHistoryRows_): the newest seven days keep every
+// hourly row, older days keep one representative row each. The
+// front collapses every series it draws — trend charts, the
+// day-over-day and trailing-window deltas, the X balance
+// runway and daily usage — to one point per Asia/Tokyo
+// calendar day (the day's last reported value per metric), so
+// a representative that carries exactly those per-day last
+// values leaves every displayed figure unchanged while the
+// payload stops growing by a row an hour forever.
 
 const SNS_HISTORY_RESPONSE_COLUMNS = [
   'collected_at',
@@ -75,6 +87,67 @@ function snsHistoryNumberCell_(value) {
   return null;
 }
 
+// How far back the served history keeps every hourly row,
+// measured from the newest row: rows inside the window are
+// served untouched. Anchoring at the newest row (rather than
+// the wall clock) keeps the freshest week at full resolution
+// even if collections stall, and matches the front's reading
+// of "the last seven days" as the last seven days of data.
+const SNS_HISTORY_HOURLY_WINDOW_MS = 7 * SNS_DAY_MS;
+
+// Collapses rows older than the hourly window to one
+// representative row per Asia/Tokyo calendar day. The
+// representative is the day's last row, with any column that
+// row leaves null filled by the day's last reported (non-null)
+// value for that column — which is exactly the value the
+// front's per-day collapse (last collection of the day that
+// carries the metric) reads, so every daily point, delta and
+// derived figure the screen computes is unchanged. A column
+// null all day stays null. Rows are expected ascending by
+// collected_at (assembleSnsHistoryResponse_ sorts before
+// calling); representatives keep that order and precede the
+// untouched window rows. Returns { rows, downsampled } with
+// downsampled true when at least one row was collapsed away.
+function downsampleSnsHistoryRows_(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return { rows: rows || [], downsampled: false };
+  }
+  const newestMs = Date.parse(rows[rows.length - 1].collected_at);
+  if (!Number.isFinite(newestMs)) {
+    return { rows, downsampled: false };
+  }
+  const cutoffMs = newestMs - SNS_HISTORY_HOURLY_WINDOW_MS;
+  const representativeByDay = new Map();
+  const kept = [];
+  let dropped = 0;
+  rows.forEach((row) => {
+    const atMs = Date.parse(row.collected_at);
+    if (!Number.isFinite(atMs) || atMs >= cutoffMs) {
+      kept.push(row);
+      return;
+    }
+    const day = jstDateKey_(atMs);
+    const representative = representativeByDay.get(day);
+    if (!representative) {
+      representativeByDay.set(day, Object.assign({}, row));
+      return;
+    }
+    dropped += 1;
+    Object.keys(row).forEach((column) => {
+      if (row[column] !== null && row[column] !== undefined) {
+        representative[column] = row[column];
+      }
+    });
+  });
+  if (dropped === 0) {
+    return { rows, downsampled: false };
+  }
+  return {
+    rows: [...representativeByDay.values(), ...kept],
+    downsampled: true,
+  };
+}
+
 // The history response rides the same read cache as the
 // other sheet-backed payloads: the hourly collection
 // precomputes it (see precomputeReadCaches_), so a read
@@ -82,7 +155,8 @@ function snsHistoryNumberCell_(value) {
 // assembled from the sheet — reading only the newest
 // SNS_HISTORY_MAX_ROWS data rows, never the whole tab: the
 // account tab grows by a row an hour forever, and rows older
-// than the cap were sliced away after the read anyway.
+// than the cap were sliced away after the read anyway. The
+// cached payload is the downsampled one the response serves.
 function buildSnsHistoryResponse_() {
   const cache = sheetReadCache_();
   if (cache) {
@@ -166,12 +240,21 @@ function assembleSnsHistoryResponse_(openedSpreadsheet) {
     .sort((a, b) =>
       a.collected_at < b.collected_at ? -1 : a.collected_at > b.collected_at ? 1 : 0
     );
-  return {
+  const downsampled = downsampleSnsHistoryRows_(
+    rows.slice(-SNS_HISTORY_MAX_ROWS)
+  );
+  const response = {
     ok: true,
     action: 'sns_history',
-    rows: rows.slice(-SNS_HISTORY_MAX_ROWS),
+    rows: downsampled.rows,
   };
+  // The flag is present only when rows were actually
+  // collapsed, so a short history answers exactly as before.
+  if (downsampled.downsampled) {
+    response.history_downsampled = true;
+  }
+  return response;
 }
 
 
-export { SNS_HISTORY_RESPONSE_COLUMNS, assembleSnsHistoryResponse_, buildSnsHistoryResponse_, snsHistoryNumberCell_, snsHistoryTimestampCell_ };
+export { SNS_HISTORY_HOURLY_WINDOW_MS, SNS_HISTORY_RESPONSE_COLUMNS, assembleSnsHistoryResponse_, buildSnsHistoryResponse_, downsampleSnsHistoryRows_, snsHistoryNumberCell_, snsHistoryTimestampCell_ };

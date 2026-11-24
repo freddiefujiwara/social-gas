@@ -911,7 +911,7 @@ describe('Sheet-backed read side (stage 2)', () => {
       expect(row.interactions_saves).toBe(1130);
     });
 
-    it('reads only the newest 6600 account rows for sns_history', () => {
+    it('reads only the newest 6600 account rows for sns_history, served downsampled', () => {
       const rows = [Code.SNS_HISTORY_ACCOUNT_COLUMNS];
       const total = 6605; // SNS_HISTORY_MAX_ROWS (6600) + 5
       const base = Date.parse('2026-01-01T00:00:00.000Z');
@@ -925,9 +925,16 @@ describe('Sheet-backed read side (stage 2)', () => {
       }
       serveTabs({ account: rows });
       const response = Code.buildSnsHistoryResponse_();
-      expect(response.rows).toHaveLength(6600);
-      expect(response.rows[0].ig_followers).toBe(5);
-      expect(response.rows[6599].ig_followers).toBe(6604);
+      // The read window starts at row 5; the served rows are
+      // downsampled: one representative per JST day for the
+      // rows older than the newest row's trailing seven days
+      // (269 days, first representative carrying row 14, the
+      // last row of its JST day inside the window), then the
+      // newest 169 hourly rows untouched.
+      expect(response.history_downsampled).toBe(true);
+      expect(response.rows).toHaveLength(269 + 169);
+      expect(response.rows[0].ig_followers).toBe(14);
+      expect(response.rows[437].ig_followers).toBe(6604);
     });
 
     it('falls back to a full account scan when the last row has no timestamp', () => {
@@ -988,6 +995,453 @@ describe('Sheet-backed read side (stage 2)', () => {
       );
       expect(totals.ok).toBe(true);
       expect(totals.data.rows[0].metricValues[0].value).toBe('4925');
+    });
+  });
+
+  describe('sns_detail scopes', () => {
+    const installCache = () => {
+      const cacheStore = new Map();
+      const facade = {
+        get: (key) => (cacheStore.has(key) ? cacheStore.get(key) : null),
+        put: (key, value) => cacheStore.set(key, value),
+        remove: (key) => cacheStore.delete(key),
+      };
+      global.CacheService = { getScriptCache: () => facade };
+      return cacheStore;
+    };
+
+    const scopedSnapshot = () => ({
+      collected_at: AT_NEW,
+      youtube: {
+        subscribers: 10,
+        total_views: 3599,
+        video_count: 7,
+        recent_videos: [{ id: 'vid-1' }, { id: 'vid-2' }],
+        youtube_error: null,
+      },
+      instagram: {
+        freddiefujiwara: 2000,
+        anemone_cancer: 59,
+        media_count: 2420,
+        views_30d: 585650,
+        non_follower_pct: 94.5,
+        insights_error: null,
+        reach_30d: 150636,
+        accounts_engaged_30d: 30000,
+        interactions_30d: {
+          total: 42000,
+          likes: 30000,
+          comments: 5000,
+          shares: 4000,
+          saves: 3000,
+        },
+        profile_links_taps_30d: null,
+        profile_links_taps_source: null,
+        follows_30d: 498,
+        unfollows_30d: 58,
+        daily_follows: [{ date: '2026-11-08', follows: 30, unfollows: 2 }],
+        daily_follows_missing_days: null,
+        daily_follows_error: null,
+        demographics: {
+          age_gender: [{ key: '25-34/F', value: 500 }],
+          top_cities: [{ key: 'Kawaguchi', value: 800 }],
+          top_countries: [{ key: 'JP', value: 1900 }],
+        },
+        detail_error: null,
+        recent_media: [{ id: 'media-1' }, { id: 'media-2' }],
+        media_error: null,
+      },
+      threads: {
+        followers: 252,
+        threads_error: null,
+        views_30d: 53558,
+        interactions_30d: {
+          total: 815,
+          likes: 654,
+          replies: 151,
+          reposts: 3,
+          quotes: 0,
+        },
+        detail_error: null,
+        recent_posts: [{ id: 'post-1' }],
+        posts_error: null,
+      },
+      x: {
+        followers: 321,
+        username: 'freddiefujiwara',
+        api_balance_usd: 41.65,
+        api_daily_posts: [{ date: '2026-11-08', tweets_consumed: 12 }],
+        usage_error: null,
+        x_error: null,
+        recent_posts: [{ id: 'tw-1' }],
+        posts_error: null,
+        reactions: { 'tw-1': [{ kind: 'like', actor_username: 'someone' }] },
+        unattributed_reactions: [{ kind: 'reply', actor_username: 'other' }],
+        recent_follows: [{ kind: 'follow', actor_username: 'fan' }],
+      },
+    });
+
+    it('serves the full payload without detail_scope when no scope is given', () => {
+      const snapshot = scopedSnapshot();
+      store.SNS_COUNTS_SNAPSHOT = JSON.stringify(snapshot);
+      const response = Code.buildSnsDetailResponse_();
+      expect(response).toEqual(
+        Object.assign({ ok: true, action: 'sns_detail' }, snapshot)
+      );
+      expect('detail_scope' in response).toBe(false);
+    });
+
+    it('treats an unknown scope as no scope', () => {
+      const snapshot = scopedSnapshot();
+      store.SNS_COUNTS_SNAPSHOT = JSON.stringify(snapshot);
+      const response = Code.buildSnsDetailResponse_('bogus');
+      expect(response).toEqual(
+        Object.assign({ ok: true, action: 'sns_detail' }, snapshot)
+      );
+      expect('detail_scope' in response).toBe(false);
+      expect(Code.normalizeSnsDetailScope_('bogus')).toBeNull();
+      expect(Code.normalizeSnsDetailScope_(undefined)).toBeNull();
+      expect(Code.normalizeSnsDetailScope_('INSTAGRAM')).toBeNull();
+      expect(Code.normalizeSnsDetailScope_('overview')).toBe('overview');
+      expect(Code.normalizeSnsDetailScope_('x')).toBe('x');
+    });
+
+    it('overview empties the heavy collections and keeps every scalar', () => {
+      const snapshot = scopedSnapshot();
+      store.SNS_COUNTS_SNAPSHOT = JSON.stringify(snapshot);
+      const response = Code.buildSnsDetailResponse_('overview');
+      expect(response.ok).toBe(true);
+      expect(response.detail_scope).toBe('overview');
+      expect(response.collected_at).toBe(AT_NEW);
+      expect(response.youtube.recent_videos).toEqual([]);
+      expect(response.instagram.recent_media).toEqual([]);
+      expect(response.threads.recent_posts).toEqual([]);
+      expect(response.x.recent_posts).toEqual([]);
+      expect(response.x.unattributed_reactions).toEqual([]);
+      expect(response.x.recent_follows).toEqual([]);
+      expect(response.x.reactions).toEqual({});
+      // Scalars and the bounded aggregates ride along untouched.
+      expect(response.instagram.freddiefujiwara).toBe(2000);
+      expect(response.instagram.views_30d).toBe(585650);
+      expect(response.instagram.interactions_30d).toEqual(
+        snapshot.instagram.interactions_30d
+      );
+      expect(response.instagram.demographics).toEqual(
+        snapshot.instagram.demographics
+      );
+      expect(response.instagram.daily_follows).toEqual(
+        snapshot.instagram.daily_follows
+      );
+      expect(response.x.api_balance_usd).toBe(41.65);
+      expect(response.x.api_daily_posts).toEqual(snapshot.x.api_daily_posts);
+      expect(response.threads.views_30d).toBe(53558);
+      expect(response.youtube.subscribers).toBe(10);
+    });
+
+    it('does not mutate the full payload when shaping a scope', () => {
+      const snapshot = scopedSnapshot();
+      store.SNS_COUNTS_SNAPSHOT = JSON.stringify(snapshot);
+      Code.buildSnsDetailResponse_('overview');
+      const full = Code.buildSnsDetailResponse_();
+      expect(full.instagram.recent_media).toHaveLength(2);
+      expect(full.x.reactions).toEqual(snapshot.x.reactions);
+    });
+
+    it('a platform scope returns only that platform, complete', () => {
+      const snapshot = scopedSnapshot();
+      store.SNS_COUNTS_SNAPSHOT = JSON.stringify(snapshot);
+      const instagram = Code.buildSnsDetailResponse_('instagram');
+      expect(Object.keys(instagram).sort()).toEqual([
+        'action',
+        'collected_at',
+        'detail_scope',
+        'instagram',
+        'ok',
+      ]);
+      expect(instagram.detail_scope).toBe('instagram');
+      expect(instagram.instagram).toEqual(snapshot.instagram);
+      const x = Code.buildSnsDetailResponse_('x');
+      expect(Object.keys(x).sort()).toEqual([
+        'action',
+        'collected_at',
+        'detail_scope',
+        'ok',
+        'x',
+      ]);
+      expect(x.x).toEqual(snapshot.x);
+      expect(x.x.reactions).toEqual(snapshot.x.reactions);
+    });
+
+    it('caches each scope under its own key', () => {
+      serveTabs(detailTabs());
+      const cacheStore = installCache();
+      Code.buildSnsDetailResponse_('threads');
+      expect(openById).toHaveBeenCalledTimes(1);
+      Code.buildSnsDetailResponse_('threads');
+      expect(openById).toHaveBeenCalledTimes(1);
+      Code.buildSnsDetailResponse_('youtube');
+      expect(openById).toHaveBeenCalledTimes(2);
+      Code.buildSnsDetailResponse_();
+      expect(openById).toHaveBeenCalledTimes(3);
+      Code.buildSnsDetailResponse_();
+      expect(openById).toHaveBeenCalledTimes(3);
+      expect(cacheStore.has('sns_detail_sheet_v1#count')).toBe(true);
+      expect(cacheStore.has('sns_detail_sheet_v1_threads#count')).toBe(true);
+      expect(cacheStore.has('sns_detail_sheet_v1_youtube#count')).toBe(true);
+      expect(Code.snsDetailCacheKey_(null)).toBe('sns_detail_sheet_v1');
+      expect(Code.snsDetailCacheKey_('overview')).toBe(
+        'sns_detail_sheet_v1_overview'
+      );
+    });
+
+    it('precomputeReadCaches_ fills every scope variant', () => {
+      serveTabs(detailTabs());
+      installCache();
+      Code.precomputeReadCaches_();
+      global.SpreadsheetApp = {
+        openById: vi.fn(() => {
+          throw new Error('sheet unreachable');
+        }),
+      };
+      const full = Code.buildSnsDetailResponse_();
+      expect(full.collected_at).toBe(AT_NEW);
+      expect(full.instagram.recent_media).toHaveLength(2);
+      const overview = Code.buildSnsDetailResponse_('overview');
+      expect(overview.detail_scope).toBe('overview');
+      expect(overview.instagram.recent_media).toEqual([]);
+      expect(overview.threads.recent_posts).toEqual([]);
+      expect(overview.youtube.recent_videos).toEqual([]);
+      expect(overview.instagram.freddiefujiwara).toBe(2000);
+      const instagram = Code.buildSnsDetailResponse_('instagram');
+      expect(instagram.instagram.recent_media).toHaveLength(2);
+      expect('threads' in instagram).toBe(false);
+      const x = Code.buildSnsDetailResponse_('x');
+      expect(x.detail_scope).toBe('x');
+      expect(x.x.followers).toBeNull();
+    });
+  });
+
+  describe('sns_history downsampling', () => {
+    const hourMs = 3600 * 1000;
+    const hourlyRows = (baseIso, count, valueFor) => {
+      const base = Date.parse(baseIso);
+      const rows = [];
+      for (let i = 0; i < count; i += 1) {
+        rows.push(
+          Object.assign(
+            {
+              collected_at: new Date(base + i * hourMs).toISOString(),
+              ig_followers: i,
+              views_30d: 1000 + i,
+            },
+            valueFor ? valueFor(i) : {}
+          )
+        );
+      }
+      return rows;
+    };
+
+    it('keeps every row inside the trailing seven days', () => {
+      const rows = hourlyRows('2026-10-01T00:00:00.000Z', 100);
+      const result = Code.downsampleSnsHistoryRows_(rows);
+      expect(result.downsampled).toBe(false);
+      expect(result.rows).toEqual(rows);
+    });
+
+    it('handles empty and single-row inputs', () => {
+      expect(Code.downsampleSnsHistoryRows_([])).toEqual({
+        rows: [],
+        downsampled: false,
+      });
+      const single = hourlyRows('2026-10-01T00:00:00.000Z', 1);
+      expect(Code.downsampleSnsHistoryRows_(single)).toEqual({
+        rows: single,
+        downsampled: false,
+      });
+    });
+
+    it('collapses older days to one representative per JST day', () => {
+      // 20 days + 1 hour of hourly rows from 2026-10-01T00:00Z:
+      // the newest row is 2026-10-21T00:00Z, so rows from
+      // 2026-10-14T00:00Z (index 312) on are kept hourly and
+      // indices 0..311 collapse to the 14 JST days they span
+      // (Oct 1 starts at 09:00 JST, so its rows end at index 14).
+      const rows = hourlyRows('2026-10-01T00:00:00.000Z', 481);
+      const result = Code.downsampleSnsHistoryRows_(rows);
+      expect(result.downsampled).toBe(true);
+      expect(result.rows).toHaveLength(14 + 169);
+      expect(result.rows[0].collected_at).toBe('2026-10-01T14:00:00.000Z');
+      expect(result.rows[0].ig_followers).toBe(14);
+      expect(result.rows[13].collected_at).toBe('2026-10-13T23:00:00.000Z');
+      expect(result.rows[13].ig_followers).toBe(311);
+      expect(result.rows[14].collected_at).toBe('2026-10-14T00:00:00.000Z');
+      expect(result.rows[14].ig_followers).toBe(312);
+      expect(result.rows[182].ig_followers).toBe(480);
+    });
+
+    it('splits days at the JST midnight, not the UTC one', () => {
+      const rows = [
+        { collected_at: '2026-10-01T14:59:00.000Z', ig_followers: 1 },
+        { collected_at: '2026-10-01T15:00:00.000Z', ig_followers: 2 },
+        { collected_at: '2026-10-02T14:59:00.000Z', ig_followers: 3 },
+        { collected_at: '2026-10-20T00:00:00.000Z', ig_followers: 4 },
+      ];
+      const result = Code.downsampleSnsHistoryRows_(rows);
+      expect(result.downsampled).toBe(true);
+      // 14:59Z is Oct 1 in Tokyo, 15:00Z already Oct 2; the two
+      // Oct 2 rows merge into one representative at the day's
+      // last row.
+      expect(result.rows.map((row) => row.ig_followers)).toEqual([1, 3, 4]);
+      expect(result.rows[1].collected_at).toBe('2026-10-02T14:59:00.000Z');
+    });
+
+    it('fills a null in the day’s last row from the day’s last reported value', () => {
+      const rows = [
+        { collected_at: '2026-10-01T01:00:00.000Z', ig_followers: 100, views_30d: null },
+        { collected_at: '2026-10-01T02:00:00.000Z', ig_followers: null, views_30d: 500 },
+        { collected_at: '2026-10-01T03:00:00.000Z', ig_followers: 105, views_30d: null },
+        { collected_at: '2026-10-20T00:00:00.000Z', ig_followers: 200, views_30d: 900 },
+      ];
+      const result = Code.downsampleSnsHistoryRows_(rows);
+      expect(result.rows).toHaveLength(2);
+      expect(result.rows[0]).toEqual({
+        collected_at: '2026-10-01T03:00:00.000Z',
+        ig_followers: 105,
+        views_30d: 500,
+      });
+    });
+
+    it('keeps a row exactly at the window boundary at full resolution', () => {
+      const rows = [
+        { collected_at: '2026-10-13T20:00:00.000Z', ig_followers: 1 },
+        { collected_at: '2026-10-14T00:00:00.000Z', ig_followers: 2 },
+        { collected_at: '2026-10-21T00:00:00.000Z', ig_followers: 3 },
+      ];
+      const result = Code.downsampleSnsHistoryRows_(rows);
+      // The boundary row is exactly seven days older than the
+      // newest row: it stays an hourly row of its own, and the
+      // older row (the same JST day) remains a separate
+      // representative before it.
+      expect(result.rows.map((row) => row.ig_followers)).toEqual([1, 2, 3]);
+      expect(result.downsampled).toBe(false);
+    });
+
+    it('preserves the front’s daily points for every served column', () => {
+      // The front (social/src/api.js) collapses the rows to
+      // one point per JST calendar day per metric — the day's
+      // last row that carries a number — and every chart,
+      // delta, runway and usage figure derives from those
+      // points alone. This mirrors that reduction and asserts
+      // it is identical on the full and downsampled rows.
+      const jstDay = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Tokyo',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      });
+      const dailyPoints = (rows, key) => {
+        const sorted = rows
+          .filter((row) => typeof row.collected_at === 'string')
+          .slice()
+          .sort((a, b) =>
+            a.collected_at < b.collected_at
+              ? -1
+              : a.collected_at > b.collected_at
+                ? 1
+                : 0
+          );
+        const byDate = new Map();
+        for (const row of sorted) {
+          if (typeof row[key] === 'number' && Number.isFinite(row[key])) {
+            const date = jstDay.format(new Date(row.collected_at)).replace(/-/g, '');
+            byDate.set(date, { date, views: row[key] });
+          }
+        }
+        return [...byDate.values()];
+      };
+      const base = Date.parse('2026-09-25T00:00:00.000Z');
+      const columns = Code.SNS_HISTORY_RESPONSE_COLUMNS.filter(
+        (column) => column !== 'collected_at'
+      );
+      const rows = [];
+      for (let i = 0; i < 30 * 24 + 1; i += 1) {
+        const at = new Date(base + i * hourMs);
+        const dayIndex = Math.floor(i / 24);
+        const row = { collected_at: at.toISOString() };
+        columns.forEach((column, columnIndex) => {
+          row[column] = 1000 * (columnIndex + 1) + i;
+        });
+        // Metrics that only started later stay null until then.
+        if (dayIndex < 2) {
+          row.threads_followers = null;
+        }
+        if (dayIndex < 3) {
+          row.x_followers = null;
+          row.x_api_balance_usd = null;
+        }
+        // The balance is a per-day level with a top-up on day
+        // 10, not a per-hour counter.
+        if (row.x_api_balance_usd !== null) {
+          row.x_api_balance_usd =
+            100 - dayIndex * 0.5 + (dayIndex >= 10 ? 10 : 0);
+        }
+        rows.push(row);
+      }
+      // A partial failure at the end of one old JST day
+      // (Oct 1): the day's last three collections report no
+      // views or interactions, so the front reads those
+      // metrics from the day's last successful collection.
+      const oct1Rows = rows.filter(
+        (row) =>
+          jstDay.format(new Date(row.collected_at)).replace(/-/g, '') ===
+          '20261001'
+      );
+      expect(oct1Rows.length).toBe(24);
+      oct1Rows.slice(-3).forEach((row) => {
+        row.views_30d = null;
+        row.interactions_total = null;
+      });
+      const result = Code.downsampleSnsHistoryRows_(rows);
+      expect(result.downsampled).toBe(true);
+      expect(result.rows.length).toBeLessThan(rows.length);
+      columns.forEach((column) => {
+        expect(dailyPoints(result.rows, column)).toEqual(
+          dailyPoints(rows, column)
+        );
+      });
+    });
+
+    it('flags the assembled response only when rows were collapsed', () => {
+      const accountRows = [Code.SNS_HISTORY_ACCOUNT_COLUMNS];
+      const base = Date.parse('2026-10-01T00:00:00.000Z');
+      for (let i = 0; i < 241; i += 1) {
+        accountRows.push(
+          accountRow({
+            collected_at: new Date(base + i * hourMs).toISOString(),
+            ig_followers: i,
+          })
+        );
+      }
+      serveTabs({ account: accountRows });
+      const response = Code.buildSnsHistoryResponse_();
+      expect(response.history_downsampled).toBe(true);
+      // 4 JST-day representatives (Oct 1–4) + the newest 169
+      // hourly rows.
+      expect(response.rows).toHaveLength(4 + 169);
+      expect(response.rows[172].ig_followers).toBe(240);
+    });
+
+    it('omits the flag on a short history', () => {
+      serveTabs({
+        account: [
+          Code.SNS_HISTORY_ACCOUNT_COLUMNS,
+          accountRow({ collected_at: AT_OLD, ig_followers: 1990 }),
+          accountRow({ collected_at: AT_NEW, ig_followers: 2000 }),
+        ],
+      });
+      const response = Code.buildSnsHistoryResponse_();
+      expect(response.rows).toHaveLength(2);
+      expect('history_downsampled' in response).toBe(false);
     });
   });
 });

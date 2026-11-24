@@ -2526,16 +2526,22 @@ describe('SNS follower counts', () => {
       expect(json.rows.map((row) => row.ig_followers)).toEqual([1988, 2000]);
     });
 
-    it('caps the response at the newest 6600 rows', () => {
+    it('caps the sns_history read at the newest 6600 rows and downsamples the served rows', () => {
       const rows = [HEADER];
       for (let i = 0; i < 6605; i += 1) {
         const at = new Date(Date.UTC(2026, 0, 1) + i * 3600 * 1000);
         rows.push(dataRow({ collected_at: at.toISOString(), ig_followers: i }));
       }
       const json = serveHistory(makeReadableSheet(rows));
-      expect(json.rows).toHaveLength(6600);
-      expect(json.rows[0].ig_followers).toBe(5);
-      expect(json.rows[6599].ig_followers).toBe(6604);
+      // The read window starts at row 5; the served payload is
+      // downsampled to one representative per JST day outside
+      // the trailing seven days (269 days; the first carries
+      // row 14, its day's last row inside the window) plus the
+      // newest 169 hourly rows.
+      expect(json.history_downsampled).toBe(true);
+      expect(json.rows).toHaveLength(269 + 169);
+      expect(json.rows[0].ig_followers).toBe(14);
+      expect(json.rows[437].ig_followers).toBe(6604);
     });
 
     it('rejects anonymous calls while authentication is configured', () => {
@@ -2967,6 +2973,60 @@ describe('SNS follower counts', () => {
       store.SNS_COUNTS_SNAPSHOT = JSON.stringify(detailSnapshot);
       Code.doGet({
         parameter: { action: 'sns_detail', share_token: testShareToken() },
+      });
+      expect(lastJson()).toEqual(
+        Object.assign({ ok: true, action: 'sns_detail' }, detailSnapshot)
+      );
+    });
+
+    it('serves the overview scope with the heavy lists emptied', () => {
+      store.GA4_PROPERTY_ID = '123456789';
+      store.SNS_COUNTS_SNAPSHOT = JSON.stringify(detailSnapshot);
+      Code.doGet({
+        parameter: {
+          action: 'sns_detail',
+          scope: 'overview',
+          share_token: testShareToken(),
+        },
+      });
+      const json = lastJson();
+      expect(json.ok).toBe(true);
+      expect(json.detail_scope).toBe('overview');
+      expect(json.youtube.recent_videos).toEqual([]);
+      expect(json.instagram.recent_media).toEqual([]);
+      expect(json.instagram.reach_30d).toBe(5000);
+      expect(json.instagram.demographics).toEqual(
+        detailSnapshot.instagram.demographics
+      );
+      expect(json.threads.followers).toBe(252);
+    });
+
+    it('serves a platform scope with only that platform', () => {
+      store.GA4_PROPERTY_ID = '123456789';
+      store.SNS_COUNTS_SNAPSHOT = JSON.stringify(detailSnapshot);
+      Code.doGet({
+        parameter: {
+          action: 'sns_detail',
+          scope: 'youtube',
+          share_token: testShareToken(),
+        },
+      });
+      const json = lastJson();
+      expect(json.detail_scope).toBe('youtube');
+      expect(json.youtube).toEqual(detailSnapshot.youtube);
+      expect('instagram' in json).toBe(false);
+      expect('threads' in json).toBe(false);
+    });
+
+    it('serves the full payload for an unknown scope', () => {
+      store.GA4_PROPERTY_ID = '123456789';
+      store.SNS_COUNTS_SNAPSHOT = JSON.stringify(detailSnapshot);
+      Code.doGet({
+        parameter: {
+          action: 'sns_detail',
+          scope: 'everything',
+          share_token: testShareToken(),
+        },
       });
       expect(lastJson()).toEqual(
         Object.assign({ ok: true, action: 'sns_detail' }, detailSnapshot)
