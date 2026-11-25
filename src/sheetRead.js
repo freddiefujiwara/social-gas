@@ -753,6 +753,32 @@ function blogTotalsData_(spreadsheet) {
   };
 }
 
+// The stored blog_totals row's view count, read directly off
+// the row (blogTotalsData_ above shapes the same row into a
+// report; this is the raw count for consumers that only need
+// the number). The '28d' row covers 28daysAgo..today and is
+// property-wide — every page of the site, no page filter —
+// so the count is the whole site's views, not the blog's.
+// Returns null when the tab or the row is missing, or when
+// the stored cell does not read as a number.
+function blogTotalsViews28d_(spreadsheet) {
+  const rows = readHistoryTabObjects_(
+    spreadsheet,
+    'blog_totals',
+    SNS_HISTORY_BLOG_TOTALS_COLUMNS
+  );
+  if (!rows) {
+    return null;
+  }
+  const row = rows.filter(
+    (entry) => historyTextOrNull_(entry.window) === BLOG_TOTALS_WINDOW_KEY
+  )[0];
+  if (!row) {
+    return null;
+  }
+  return snsHistoryNumberCell_(row.views);
+}
+
 // A report date parameter ('today', '28daysAgo',
 // 'YYYY-MM-DD') resolved to the JST calendar key the sheet
 // keys days by, or null for anything else.
@@ -1065,4 +1091,4 @@ function buildBlogReportResponse_(params, shareSession) {
 }
 
 
-export { BLOG_REPORT_CACHE_KEY_PREFIX, BLOG_REPORT_CACHE_SECONDS, SNS_DETAIL_CACHE_KEY, SNS_DETAIL_CACHE_SECONDS, SNS_HISTORY_CACHE_KEY, SNS_HISTORY_CACHE_SECONDS, blogDailyData_, blogPagesData_, blogReportShape_, blogScrollData_, blogSourcesData_, blogSpeedData_, blogTotalsData_, buildBlogReportResponse_, buildSnsDetailFromSheet_, compareTimestampDesc_, getCachedText_, historyTextOrNull_, historyTimestampOrNull_, latestAccountRow_, latestBatchRows_, openHistorySpreadsheet_, putCachedText_, readHistoryTabLastRowObject_, readHistoryTabObjects_, resolveBlogDateKey_, sheetReadCache_ };
+export { BLOG_REPORT_CACHE_KEY_PREFIX, BLOG_REPORT_CACHE_SECONDS, SNS_DETAIL_CACHE_KEY, SNS_DETAIL_CACHE_SECONDS, SNS_HISTORY_CACHE_KEY, SNS_HISTORY_CACHE_SECONDS, blogDailyData_, blogPagesData_, blogReportShape_, blogScrollData_, blogSourcesData_, blogSpeedData_, blogTotalsData_, blogTotalsViews28d_, buildBlogReportResponse_, buildSnsDetailFromSheet_, compareTimestampDesc_, getCachedText_, historyTextOrNull_, historyTimestampOrNull_, latestAccountRow_, latestBatchRows_, openHistorySpreadsheet_, putCachedText_, readHistoryTabLastRowObject_, readHistoryTabObjects_, resolveBlogDateKey_, sheetReadCache_ };

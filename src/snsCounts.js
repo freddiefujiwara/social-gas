@@ -4,17 +4,19 @@
 import { getScriptProperty_ } from './auth.js';
 import { parseInsightsTotalValue_ } from './instagramDetail.js';
 import { SNS_HISTORY_SHEET_ID_PROPERTY, summarizeSnsHistoryError_ } from './historyWrite.js';
-import { SNS_DETAIL_CACHE_KEY, SNS_DETAIL_CACHE_SECONDS, buildSnsDetailFromSheet_, getCachedText_, putCachedText_, sheetReadCache_ } from './sheetRead.js';
+import { SNS_DETAIL_CACHE_KEY, SNS_DETAIL_CACHE_SECONDS, blogTotalsViews28d_, buildSnsDetailFromSheet_, getCachedText_, openHistorySpreadsheet_, putCachedText_, sheetReadCache_ } from './sheetRead.js';
 
 // --- SNS follower counts (YouTube / Instagram / Threads) ---
 // collectSnsCounts() runs on a time-driven trigger (see setupSnsTriggers)
 // and stores a snapshot in the Script Property SNS_COUNTS_SNAPSHOT.
 // The action=sns_counts endpoint is public by design: it only ever
 // returns the public projection of that snapshot (follower counts,
-// the Instagram KPIs, collected_at). It never exposes tokens, any
-// GA4 data, or the admin-only detail in the snapshot; the full
-// snapshot is served by action=sns_detail behind the usual
-// authentication gate (see buildSnsDetailResponse_).
+// the Instagram KPIs, collected_at), plus the one stored GA4
+// figure site_views_28d (see the projection comment above
+// buildSnsCountsResponse_). It never exposes tokens or the
+// admin-only detail in the snapshot; the full snapshot is served
+// by action=sns_detail behind the usual authentication gate (see
+// buildSnsDetailResponse_).
 //
 // Script Properties used here:
 //   META_ACCESS_TOKEN: Meta long-lived user token (about 60 days) used
@@ -96,6 +98,15 @@ function getSnsCountsSnapshot_() {
 // saves_30d (the snapshot's interactions_30d.saves) are part of the
 // projection because the top page hero shows them; they are the
 // same stored values action=sns_detail serves.
+// site_views_28d is the one field that does not come from the
+// snapshot: it is the stored blog_totals '28d' row's views (see
+// blogTotalsViews28d_ in sheetRead.js) — the GA4 property's total
+// screenPageViews over 28daysAgo..today with no page filter, so
+// it counts the whole site including the top page itself, hence
+// "site" rather than "blog". It is read on every call and fails
+// safe to null (see siteViews28dOrNull_ below), so a history
+// sheet problem can never break the counts the top page build
+// depends on.
 function buildSnsCountsResponse_() {
   const snapshot = getSnsCountsSnapshot_();
   if (!snapshot) {
@@ -103,6 +114,7 @@ function buildSnsCountsResponse_() {
       ok: true,
       action: 'sns_counts',
       collected_at: null,
+      site_views_28d: siteViews28dOrNull_(),
       youtube: { subscribers: null },
       instagram: {
         freddiefujiwara: null,
@@ -126,6 +138,7 @@ function buildSnsCountsResponse_() {
     ok: true,
     action: 'sns_counts',
     collected_at: snapshot.collected_at || null,
+    site_views_28d: siteViews28dOrNull_(),
     youtube: { subscribers: snsNumberOrNull_(youtube.subscribers) },
     instagram: {
       freddiefujiwara: snsNumberOrNull_(instagram.freddiefujiwara),
@@ -143,6 +156,23 @@ function buildSnsCountsResponse_() {
     threads: { followers: snsNumberOrNull_(threads.followers) },
     x: { followers: snsNumberOrNull_(x.followers) },
   };
+}
+
+// site_views_28d for the public projection (see the projection
+// comment above): the stored blog totals read, failed safe. The
+// history property unset, the spreadsheet unreachable, the tab
+// or the row missing — everything reads as null, and the rest
+// of the response is served exactly as before.
+function siteViews28dOrNull_() {
+  try {
+    const spreadsheet = openHistorySpreadsheet_();
+    if (!spreadsheet) {
+      return null;
+    }
+    return blogTotalsViews28d_(spreadsheet);
+  } catch (err) {
+    return null;
+  }
 }
 
 function snsNumberOrNull_(value) {
