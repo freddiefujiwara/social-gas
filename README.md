@@ -48,7 +48,7 @@ YouTube・Instagram・Threads のフォロワー数を GAS 自身が定期取得
 
 - 取得：`collectSnsCounts` を時間主導型トリガー（1時間ごと）で実行。トリガーはデプロイでは入らないため、エディタで `setupSnsTriggers` を1回実行して設置する
 - 保存先：スクリプトプロパティ `SNS_COUNTS_SNAPSHOT`（各SNSの数値＋取得日時 collected_at）
-- 読み取り：`?action=sns_counts`。返すのはスナップショットのみで、トークンや GA4 データは含まない
+- 読み取り：`?action=sns_counts`。返すのはスナップショットの射影のみで、トークンは含まない（GA4 由来の値は下記の `site_views_28d` だけ）
 - YouTube：高度なサービス（YouTube Data API v3）で登録者数を取得。GCP プロジェクト側で YouTube Data API v3 の有効化が必要
 - Instagram / Threads：スクリプトプロパティ `META_ACCESS_TOKEN`（Meta の長期ユーザートークン）で Graph API から取得。`META_APP_ID` / `META_APP_SECRET` を設定すると、期限が近づいたトークンを `fb_exchange_token` で自動延長する（有効期限は `META_TOKEN_EXPIRES_AT` に記録）
 - Threads 専用トークンを使う場合は `META_THREADS_ACCESS_TOKEN` を設定する（未設定なら `META_ACCESS_TOKEN` で代用）。その有効期限は `META_THREADS_TOKEN_EXPIRES_AT` に記録され、`th_refresh_token` で自動延長される
@@ -56,6 +56,7 @@ YouTube・Instagram・Threads のフォロワー数を GAS 自身が定期取得
 - トークン未設定・失効のサービスは null になり、他のサービスの取得は続く
 - Instagram の KPI（メインアカウントのみ、スナップショットの `instagram` 内）：`media_count`（投稿数、`instagram_basic` で取得可）、`views_30d`（過去30日の Views 合計）と `non_follower_pct`（そのうちフォロワー以外％、小数1桁）はインサイト由来で、`META_ACCESS_TOKEN` に `instagram_manage_insights` 権限が付くまでは null のまま（付与後は自動で数値が入る）。インサイト取得が失敗した場合は `instagram.insights_error` に API エラーの要約（HTTP ステータスと Graph API の code / subcode / message、秘密値は含まない）が入り、日別合計へのフォールバック時もその旨が記録される（成功時は null）
 - 公開用の射影には `reach_30d`（過去30日に届いたアカウント数）と `saves_30d`（過去30日の保存数、スナップショットの `interactions_30d.saves`）も含む（トップページのヒーロー表示用で、値は次節の詳細データと同じ保存値）
+- `site_views_28d`（トップページのヒーロー表示用）：保存済みの blog_totals の `28d` 行の views。GA4 プロパティ全体（ページの絞り込みなし）の過去28日（28daysAgo..today）の screenPageViews なので、「ブログ」ではなく「サイト」全体の閲覧数。履歴シートが読めない・行がない場合は null になり、他のフィールドには影響しない
 - なお `action=sns_counts` が返すのは公開用の射影（上記のフォロワー数と KPI のみ）で、次節の詳細データは公開アクションには一切含まれない
 
 ## SNS詳細（action=sns_detail、認証必須）

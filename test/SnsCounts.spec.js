@@ -462,6 +462,7 @@ describe('SNS follower counts', () => {
         ok: true,
         action: 'sns_counts',
         collected_at: null,
+        site_views_28d: null,
         youtube: { subscribers: null },
         instagram: {
           freddiefujiwara: null,
@@ -491,6 +492,7 @@ describe('SNS follower counts', () => {
         ok: true,
         action: 'sns_counts',
         collected_at: '2026-11-08T12:00:00.000Z',
+        site_views_28d: null,
         youtube: { subscribers: 8 },
         instagram: {
           freddiefujiwara: 1988,
@@ -599,6 +601,119 @@ describe('SNS follower counts', () => {
       const json = lastJson();
       expect(json.ok).toBe(true);
       expect(json.collected_at).toBeNull();
+    });
+  });
+
+  describe('doGet action=sns_counts site_views_28d', () => {
+    let sheets;
+    let openById;
+
+    const makeSheet = () => {
+      const sheet = {
+        rows: [],
+        getLastRow() {
+          return sheet.rows.length;
+        },
+        getRange(row, col, numRows, numCols) {
+          return {
+            getValues: () => {
+              const out = [];
+              for (let i = 0; i < numRows; i++) {
+                const source = sheet.rows[row - 1 + i] || [];
+                out.push(
+                  source.slice(col - 1, col - 1 + (numCols || source.length))
+                );
+              }
+              return out;
+            },
+          };
+        },
+      };
+      return sheet;
+    };
+
+    const blogTotalsSheet = (dataRows) => {
+      const sheet = makeSheet();
+      sheet.rows.push(Code.SNS_HISTORY_BLOG_TOTALS_COLUMNS.slice());
+      dataRows.forEach((row) => sheet.rows.push(row.slice()));
+      return sheet;
+    };
+
+    beforeEach(() => {
+      sheets = {};
+      const spreadsheet = {
+        getSheetByName: (name) => sheets[name] || null,
+      };
+      openById = vi.fn(() => spreadsheet);
+      global.SpreadsheetApp = { openById };
+      store.SNS_HISTORY_SHEET_ID = 'history-sheet-id';
+    });
+
+    it('serves the stored blog_totals 28d views as a number', () => {
+      store.SNS_COUNTS_SNAPSHOT = JSON.stringify({
+        collected_at: '2026-11-25T03:20:00.000Z',
+        youtube: { subscribers: 13 },
+        instagram: { freddiefujiwara: 2206 },
+        threads: { followers: 263 },
+        x: { followers: 1844 },
+      });
+      sheets.blog_totals = blogTotalsSheet([
+        ['28d', 7369, 647, 1359, '2026-11-25T03:20:00.000Z'],
+      ]);
+      Code.doGet({ parameter: { action: 'sns_counts' } });
+      const json = lastJson();
+      expect(json.site_views_28d).toBe(7369);
+      // The rest of the projection is untouched.
+      expect(json.youtube).toEqual({ subscribers: 13 });
+      expect(json.instagram.freddiefujiwara).toBe(2206);
+      expect(json.threads).toEqual({ followers: 263 });
+      expect(json.x).toEqual({ followers: 1844 });
+    });
+
+    it('is null when the 28d row is missing from blog_totals', () => {
+      store.SNS_COUNTS_SNAPSHOT = JSON.stringify({
+        collected_at: '2026-11-25T03:20:00.000Z',
+        threads: { followers: 263 },
+      });
+      sheets.blog_totals = blogTotalsSheet([
+        ['7d', 100, 50, 60, '2026-11-25T03:20:00.000Z'],
+      ]);
+      Code.doGet({ parameter: { action: 'sns_counts' } });
+      expect(lastJson().site_views_28d).toBeNull();
+    });
+
+    it('is null when the blog_totals tab does not exist', () => {
+      Code.doGet({ parameter: { action: 'sns_counts' } });
+      expect(lastJson().site_views_28d).toBeNull();
+    });
+
+    it('is null, with the rest of the projection intact, when the totals read throws', () => {
+      store.SNS_COUNTS_SNAPSHOT = JSON.stringify({
+        collected_at: '2026-11-25T03:20:00.000Z',
+        youtube: { subscribers: 13 },
+        instagram: { freddiefujiwara: 2206 },
+        threads: { followers: 263 },
+      });
+      openById.mockImplementation(() => {
+        throw new Error('drive exploded');
+      });
+      Code.doGet({ parameter: { action: 'sns_counts' } });
+      const json = lastJson();
+      expect(json.ok).toBe(true);
+      expect(json.site_views_28d).toBeNull();
+      expect(json.youtube).toEqual({ subscribers: 13 });
+      expect(json.instagram.freddiefujiwara).toBe(2206);
+      expect(json.threads).toEqual({ followers: 263 });
+    });
+
+    it('is carried by the null-snapshot branch too', () => {
+      sheets.blog_totals = blogTotalsSheet([
+        ['28d', 7369, 647, 1359, '2026-11-25T03:20:00.000Z'],
+      ]);
+      Code.doGet({ parameter: { action: 'sns_counts' } });
+      const json = lastJson();
+      expect(json.collected_at).toBeNull();
+      expect(json.site_views_28d).toBe(7369);
     });
   });
 
