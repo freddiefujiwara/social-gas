@@ -319,10 +319,19 @@ function mergeBlogPathRows_(rows, keyOf) {
 
 // The canonical key a pagePath counts under in the sheet and in
 // the screen's page ranking: an article's split forms merge
-// under /blog/<id>; every other path is its own key.
+// under /blog/<id>; every other path is its own key. The
+// language editions are the exception: they keep their raw
+// /blog/en/<id> / /blog/zh/<id> key here even though
+// articleIdFromPath_ counts them toward the article in the
+// per-article tabs — blog_pages feeds the screen's language
+// breakdown, which reads the edition rows as they are.
 function canonicalBlogPath_(path) {
-  const id = articleIdFromPath_(path);
-  return id ? '/blog/' + id : String(path || '');
+  const raw = String(path || '');
+  if (/^\/blog\/(en|zh)\//.test(raw)) {
+    return raw;
+  }
+  const id = articleIdFromPath_(raw);
+  return id ? '/blog/' + id : raw;
 }
 
 // The blog's per-article views over the last 28 days, merged

@@ -117,7 +117,8 @@ function fetchMusicCount_(propertyId) {
 // hour no matter how often the action is called.
 //
 // Article paths are recorded both as /<id> (the SPA's
-// base-relative route) and as /blog/<id> (the real URL); the two
+// base-relative route) and as /blog/<id> (the real URL); the
+// language editions add /blog/en/<id> and /blog/zh/<id>. All
 // forms are merged before ranking, the same rule the /ga screen
 // applies in its page ranking.
 const TOP_ARTICLES_CACHE_KEY = 'top_articles_v1';
@@ -130,10 +131,13 @@ const ARTICLE_ID_PATTERN = /^[0-9][A-Za-z0-9_-]{24,}$/;
 // The blog article id a pagePath belongs to, or '' when the path
 // is not a blog article. Article ids are the long URL-safe
 // document tokens (they start with a digit); app pages such as
-// /list-of-stuff/ are not articles.
+// /list-of-stuff/ are not articles. The language segment only
+// counts right after /blog/ (the editions live under
+// /blog/en/... and /blog/zh/...), so a bare /en/<id> stays a
+// non-article exactly as before.
 function articleIdFromPath_(path) {
   const id = String(path || '')
-    .replace(/^\/(blog\/)?/, '')
+    .replace(/^\/(blog\/((en|zh)\/)?)?/, '')
     .replace(/\/$/, '');
   return ARTICLE_ID_PATTERN.test(id) ? id : '';
 }

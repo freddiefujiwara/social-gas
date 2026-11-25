@@ -1912,6 +1912,141 @@ describe('SNS follower counts', () => {
       );
     });
 
+    it('extracts the article id from the language edition paths', () => {
+      const id = '1abcdefghijklmnopqrstuvwx';
+      expect(Code.articleIdFromPath_('/blog/en/' + id)).toBe(id);
+      expect(Code.articleIdFromPath_('/blog/zh/' + id)).toBe(id);
+      expect(Code.articleIdFromPath_('/blog/en/' + id + '/')).toBe(id);
+      // The forms that already counted stay exactly as they were.
+      expect(Code.articleIdFromPath_('/blog/' + id)).toBe(id);
+      expect(Code.articleIdFromPath_('/' + id)).toBe(id);
+      // The language indexes and every other non-article path
+      // stay out, including a bare /en/<id> (the language
+      // segment only counts right after /blog/) and the
+      // staging prefix.
+      expect(Code.articleIdFromPath_('/blog/en/')).toBe('');
+      expect(Code.articleIdFromPath_('/blog/zh/')).toBe('');
+      expect(Code.articleIdFromPath_('/blog/en')).toBe('');
+      expect(Code.articleIdFromPath_('/en/')).toBe('');
+      expect(Code.articleIdFromPath_('/en/' + id)).toBe('');
+      expect(Code.articleIdFromPath_('/blog/staging/' + id)).toBe('');
+      expect(Code.articleIdFromPath_('/list-of-stuff/')).toBe('');
+      expect(Code.articleIdFromPath_('/')).toBe('');
+    });
+
+    it('merges the language editions into blog_posts, keeps them raw in blog_pages', () => {
+      mockGa4Blog({
+        posts: [
+          ga4Row(['/1abcdefghijklmnopqrstuvwx', '記事タイトルA'], [10]),
+          ga4Row(['/blog/1abcdefghijklmnopqrstuvwx', '記事タイトルA別形'], [5]),
+          ga4Row(['/blog/en/1abcdefghijklmnopqrstuvwx', 'Title A EN'], [7]),
+          ga4Row(['/blog/zh/1abcdefghijklmnopqrstuvwx', '記事標題A'], [2]),
+          ga4Row(['/blog/2abcdefghijklmnopqrstuvwx', '(not set)'], [3]),
+          ga4Row(['/', 'トップ'], [999]),
+          ga4Row(['/blog/', 'ブログトップ'], [50]),
+          ga4Row(['/blog/en/', 'Blog (EN)'], [40]),
+        ],
+      });
+      // blog_posts: all four forms of the article sum into one
+      // row; the title still comes from the most-viewed form
+      // (the base-relative ja form at 10 views).
+      expect(Code.fetchBlogPostsData_('123456789')).toEqual([
+        {
+          path: '/blog/1abcdefghijklmnopqrstuvwx',
+          title: '記事タイトルA',
+          views_28d: 24,
+        },
+        {
+          path: '/blog/2abcdefghijklmnopqrstuvwx',
+          title: '',
+          views_28d: 3,
+        },
+      ]);
+      // blog_pages: unchanged — the ja forms merge as before
+      // while the language editions and their index keep their
+      // raw paths for the screen's language breakdown.
+      expect(Code.fetchBlogPagesData_('123456789')).toEqual([
+        { path: '/', title: 'トップ', views_28d: 999 },
+        { path: '/blog/', title: 'ブログトップ', views_28d: 50 },
+        { path: '/blog/en/', title: 'Blog (EN)', views_28d: 40 },
+        {
+          path: '/blog/1abcdefghijklmnopqrstuvwx',
+          title: '記事タイトルA',
+          views_28d: 15,
+        },
+        {
+          path: '/blog/en/1abcdefghijklmnopqrstuvwx',
+          title: 'Title A EN',
+          views_28d: 7,
+        },
+        {
+          path: '/blog/2abcdefghijklmnopqrstuvwx',
+          title: '',
+          views_28d: 3,
+        },
+        {
+          path: '/blog/zh/1abcdefghijklmnopqrstuvwx',
+          title: '記事標題A',
+          views_28d: 2,
+        },
+      ]);
+      expect(
+        Code.canonicalBlogPath_('/blog/en/1abcdefghijklmnopqrstuvwx')
+      ).toBe('/blog/en/1abcdefghijklmnopqrstuvwx');
+      expect(
+        Code.canonicalBlogPath_('/blog/zh/1abcdefghijklmnopqrstuvwx')
+      ).toBe('/blog/zh/1abcdefghijklmnopqrstuvwx');
+    });
+
+    it('merges the language editions into blog_posts_daily per day', () => {
+      mockGa4Blog({
+        postsDaily: [
+          ga4Row(['20261108', '/1abcdefghijklmnopqrstuvwx', '記事タイトルA'], [10]),
+          ga4Row(['20261108', '/blog/en/1abcdefghijklmnopqrstuvwx', 'Title A EN'], [7]),
+          ga4Row(['20261108', '/blog/zh/1abcdefghijklmnopqrstuvwx', '記事標題A'], [2]),
+          ga4Row(['20261108', '/', 'トップ'], [999]),
+          ga4Row(['20261109', '/blog/2abcdefghijklmnopqrstuvwx', '(not set)'], [3]),
+        ],
+      });
+      expect(Code.fetchBlogPostsDailyData_('123456789')).toEqual([
+        {
+          date: '2026-11-08',
+          path: '/blog/1abcdefghijklmnopqrstuvwx',
+          title: '記事タイトルA',
+          views: 19,
+        },
+        {
+          date: '2026-11-09',
+          path: '/blog/2abcdefghijklmnopqrstuvwx',
+          title: '',
+          views: 3,
+        },
+      ]);
+    });
+
+    it('sums the language editions into the top articles ranking', () => {
+      const row = (path, views) => ({
+        dimensionValues: [{ value: path }],
+        metricValues: [{ value: String(views) }],
+      });
+      const id = '1abcdefghijklmnopqrstuvwx';
+      expect(
+        Code.rankTopArticles_(
+          [
+            row('/blog/' + id, 10),
+            row('/' + id, 1),
+            row('/blog/en/' + id, 7),
+            row('/blog/zh/' + id, 2),
+            row('/blog/2abcdefghijklmnopqrstuvwx', 15),
+          ],
+          10
+        )
+      ).toEqual([
+        { id, views: 20 },
+        { id: '2abcdefghijklmnopqrstuvwx', views: 15 },
+      ]);
+    });
+
     it('reads the range totals and the channel split', () => {
       mockGa4Blog();
       const totals = Code.fetchBlogTotalsData_('123456789');
