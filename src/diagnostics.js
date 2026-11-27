@@ -134,6 +134,29 @@ function debugInstagramDailyFollows() {
   );
 }
 
+// Shared transport for manual diagnostics. Keep the raw body available
+// for parsers, but log only a redacted URL and the exception type.
+function debugFetch_(url, token) {
+  Logger.log('GET ' + url + '&access_token=<redacted>');
+  let res;
+  try {
+    res = UrlFetchApp.fetch(
+      url + '&access_token=' + encodeURIComponent(token),
+      { muteHttpExceptions: true }
+    );
+  } catch (err) {
+    Logger.log('fetch exception (' + ((err && err.name) || 'Error') + ')');
+    return null;
+  }
+  const status = res.getResponseCode();
+  Logger.log('HTTP ' + status);
+  return { status, bodyText: res.getContentText() };
+}
+
+function debugLogBody_(bodyText, token) {
+  Logger.log(debugScrubToken_(bodyText, token).slice(0, SNS_DEBUG_LOG_LIMIT));
+}
+
 // Fetches one insights shape for debugSnsInsights and logs the
 // request URL (token redacted), the HTTP status and the raw body,
 // truncated to SNS_DEBUG_LOG_LIMIT characters. With errorsOnly, an
@@ -144,25 +167,14 @@ function debugLogInsightsShape_(label, query, token, options) {
   const opts = options || {};
   const base = META_GRAPH_BASE + SNS_INSTAGRAM_MAIN_ID + '/insights?' + query;
   Logger.log('=== ' + label + ' ===');
-  Logger.log('GET ' + base + '&access_token=<redacted>');
-  let res;
-  try {
-    res = UrlFetchApp.fetch(
-      base + '&access_token=' + encodeURIComponent(token),
-      { muteHttpExceptions: true }
-    );
-  } catch (err) {
-    Logger.log('fetch exception (' + ((err && err.name) || 'Error') + ')');
-    return;
-  }
-  const status = res.getResponseCode();
-  const bodyText = res.getContentText();
-  Logger.log('HTTP ' + status);
+  const response = debugFetch_(base, token);
+  if (!response) return;
+  const { status, bodyText } = response;
   if (status !== 200 && opts.errorsOnly) {
-    Logger.log(summarizeInsightsError_(status, bodyText));
+    Logger.log(summarizeInsightsError_(status, debugScrubToken_(bodyText, token)));
     return;
   }
-  Logger.log(debugScrubToken_(bodyText, token).slice(0, SNS_DEBUG_LOG_LIMIT));
+  debugLogBody_(bodyText, token);
   if (opts.summarizeValues && status === 200) {
     let data = null;
     try {
@@ -190,7 +202,8 @@ function debugScrubToken_(text, token) {
   if (!token) {
     return value;
   }
-  return value.split(token).join('<redacted>');
+  return value.split(token).join('<redacted>')
+    .split(encodeURIComponent(token)).join('<redacted>');
 }
 
 // --- Manual diagnostics: debugThreadsFollowers --------------------
@@ -238,27 +251,13 @@ function debugThreadsFollowers() {
         : ' (THREADS_USER_ID is not set; using the SNS_THREADS_USER_ID fallback)')
   );
   const base = threadsFollowersInsightsUrl_(userId);
-  Logger.log('GET ' + base + '&access_token=<redacted>');
-  let res;
-  try {
-    res = UrlFetchApp.fetch(
-      base + '&access_token=' + encodeURIComponent(token),
-      { muteHttpExceptions: true }
-    );
-  } catch (err) {
-    Logger.log('fetch exception (' + ((err && err.name) || 'Error') + ')');
-    return;
-  }
-  Logger.log('HTTP ' + res.getResponseCode());
-  Logger.log(
-    debugScrubToken_(res.getContentText(), token).slice(
-      0,
-      SNS_DEBUG_LOG_LIMIT
-    )
-  );
+  const response = debugFetch_(base, token);
+  if (!response) return;
+  const { bodyText } = response;
+  debugLogBody_(bodyText, token);
   let parsed = null;
   try {
-    parsed = parseThreadsFollowersCount_(JSON.parse(res.getContentText()));
+    parsed = parseThreadsFollowersCount_(JSON.parse(bodyText));
   } catch (err) {
     parsed = null;
   }
@@ -337,7 +336,7 @@ function debugThreadsPosts() {
     return;
   }
   const firstEntry = buildThreadsPostEntry_(items[0]);
-  Logger.log('first post entry: ' + JSON.stringify(firstEntry));
+  Logger.log('first post entry: ' + debugScrubToken_(JSON.stringify(firstEntry), token));
   if (firstEntry.id == null) {
     Logger.log('first post has no id; skipping media insights.');
     return;
@@ -366,23 +365,10 @@ function debugThreadsPosts() {
 // the real request, never to the logged one.
 function debugThreadsGet_(label, url, token) {
   Logger.log('=== ' + label + ' ===');
-  Logger.log('GET ' + url + '&access_token=<redacted>');
-  let res;
-  try {
-    res = UrlFetchApp.fetch(
-      url + '&access_token=' + encodeURIComponent(token),
-      { muteHttpExceptions: true }
-    );
-  } catch (err) {
-    Logger.log('fetch exception (' + ((err && err.name) || 'Error') + ')');
-    return null;
-  }
-  const status = res.getResponseCode();
-  Logger.log('HTTP ' + status);
-  const bodyText = res.getContentText();
-  Logger.log(
-    debugScrubToken_(bodyText, token).slice(0, SNS_DEBUG_LOG_LIMIT)
-  );
+  const response = debugFetch_(url, token);
+  if (!response) return null;
+  const { status, bodyText } = response;
+  debugLogBody_(bodyText, token);
   if (status !== 200) {
     return null;
   }
@@ -395,4 +381,4 @@ function debugThreadsGet_(label, url, token) {
 }
 
 
-export { debugInstagramDailyFollows, debugThreadsFollowers, debugThreadsPosts };
+export { debugSnsInsights, debugInstagramDailyFollows, debugThreadsFollowers, debugThreadsPosts };
