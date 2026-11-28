@@ -589,23 +589,28 @@ function initTikTokInboxUpload_(token, videoSize, plan) {
 // One chunk PUT against the upload URL (not a JSON call: the
 // endpoint answers 206 for an interim chunk and 201 for the
 // final one, with no body to speak of). Returns { error } and
-// never throws, like the other fetch helpers.
+// never throws, like the other fetch helpers. The chunk goes
+// as a Blob and Content-Length is NOT set by hand: UrlFetchApp
+// rejects a manual Content-Length header ("Attribute provided
+// with invalid value: Header:Content-Length" — the actual
+// cause of the fetch exceptions seen in production on
+// 2026-11-28) and computes it from the Blob instead.
 function putTikTokVideoChunk_(uploadUrl, chunk, first, last, totalSize) {
   let res;
   try {
     res = UrlFetchApp.fetch(uploadUrl, {
       method: 'put',
-      contentType: 'video/mp4',
       headers: {
-        'Content-Length': String(chunk.length),
         'Content-Range': 'bytes ' + first + '-' + last + '/' + totalSize,
       },
-      payload: chunk,
+      payload: Utilities.newBlob(chunk, 'video/mp4'),
       muteHttpExceptions: true,
     });
   } catch (err) {
     return {
-      error: 'fetch exception (' + ((err && err.name) || 'Error') + ')',
+      error:
+        'fetch exception: ' +
+        ((err && err.message) || (err && err.name) || 'unknown'),
     };
   }
   const status = res.getResponseCode();
