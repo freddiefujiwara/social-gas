@@ -671,11 +671,18 @@ describe('X via tweet-gas (GAS-to-GAS sync)', () => {
       expect(row[totalIndex]).toBe(2000 + 252 + 10 + 321);
       const xIndex = Code.SNS_HISTORY_ACCOUNT_COLUMNS.indexOf('x_followers');
       expect(row[xIndex]).toBe(321);
-      // The API balance column rides last, after x_followers.
+      // The API balance column rides right after x_followers;
+      // the TikTok totals were appended after it (the columns
+      // may only ever join at the end).
       const balanceIndex =
         Code.SNS_HISTORY_ACCOUNT_COLUMNS.indexOf('x_api_balance_usd');
-      expect(balanceIndex).toBe(Code.SNS_HISTORY_ACCOUNT_COLUMNS.length - 1);
+      expect(balanceIndex).toBe(xIndex + 1);
       expect(row[balanceIndex]).toBe('');
+      expect(Code.SNS_HISTORY_ACCOUNT_COLUMNS.slice(-3)).toEqual([
+        'tiktok_followers',
+        'tiktok_total_likes',
+        'tiktok_video_count',
+      ]);
     });
 
     it('builds one x_media row per post, without the derived URL', () => {

@@ -6,9 +6,10 @@ import { buildEmptySnsDetail_ } from './snsCounts.js';
 import { SNS_THREADS_RECENT_POSTS_LIMIT } from './threadsDetail.js';
 import { SNS_X_RECENT_POSTS_LIMIT, dedupeXDailyPosts_, xDailyDateKey_ } from './xDetail.js';
 import { SNS_HISTORY_X_REACTIONS_COLUMNS, SNS_X_REACTIONS_TAB, SNS_X_RECENT_FOLLOWS_LIMIT, SNS_X_UNATTRIBUTED_LIMIT } from './xReactions.js';
+import { SNS_TIKTOK_RECENT_VIDEOS_LIMIT, tikTokStoredUsername_, tikTokVideoUrl_ } from './tiktokDetail.js';
 import { SNS_DEMOGRAPHICS_TOP_LIMIT, SNS_RECENT_MEDIA_LIMIT, SNS_RECENT_VIDEO_LIMIT } from './instagramDetail.js';
 import { SNS_DAY_MS, jstDateKey_ } from './instagramDaily.js';
-import { BLOG_TOTALS_WINDOW_KEY, SNS_HISTORY_ACCOUNT_COLUMNS, SNS_HISTORY_BLOG_DAILY_COLUMNS, SNS_HISTORY_BLOG_PAGES_COLUMNS, SNS_HISTORY_BLOG_SCROLL_COLUMNS, SNS_HISTORY_BLOG_SOURCES_COLUMNS, SNS_HISTORY_BLOG_SPEED_COLUMNS, SNS_HISTORY_BLOG_TOTALS_COLUMNS, SNS_HISTORY_DAILY_COLUMNS, SNS_HISTORY_DEMOGRAPHICS_COLUMNS, SNS_HISTORY_MEDIA_COLUMNS, SNS_HISTORY_SHEET_ID_PROPERTY, SNS_HISTORY_THREADS_ACCOUNT_COLUMNS, SNS_HISTORY_THREADS_MEDIA_COLUMNS, SNS_HISTORY_X_DAILY_COLUMNS, SNS_HISTORY_X_MEDIA_COLUMNS, SNS_HISTORY_YOUTUBE_MEDIA_COLUMNS, readSnsHistoryRows_, snsHistoryKeyCell_, summarizeSnsHistoryError_ } from './historyWrite.js';
+import { BLOG_TOTALS_WINDOW_KEY, SNS_HISTORY_ACCOUNT_COLUMNS, SNS_HISTORY_BLOG_DAILY_COLUMNS, SNS_HISTORY_BLOG_PAGES_COLUMNS, SNS_HISTORY_BLOG_SCROLL_COLUMNS, SNS_HISTORY_BLOG_SOURCES_COLUMNS, SNS_HISTORY_BLOG_SPEED_COLUMNS, SNS_HISTORY_BLOG_TOTALS_COLUMNS, SNS_HISTORY_DAILY_COLUMNS, SNS_HISTORY_DEMOGRAPHICS_COLUMNS, SNS_HISTORY_MEDIA_COLUMNS, SNS_HISTORY_SHEET_ID_PROPERTY, SNS_HISTORY_THREADS_ACCOUNT_COLUMNS, SNS_HISTORY_THREADS_MEDIA_COLUMNS, SNS_HISTORY_TIKTOK_MEDIA_COLUMNS, SNS_HISTORY_X_DAILY_COLUMNS, SNS_HISTORY_X_MEDIA_COLUMNS, SNS_HISTORY_YOUTUBE_MEDIA_COLUMNS, readSnsHistoryRows_, snsHistoryKeyCell_, summarizeSnsHistoryError_ } from './historyWrite.js';
 import { BLOG_RENDER_METRIC, BLOG_RENDER_SLOW_METRIC, BLOG_SCROLL_DIMENSION, BLOG_SCROLL_LEVELS } from './blogHistory.js';
 import { snsHistoryNumberCell_, snsHistoryTimestampCell_ } from './snsHistoryRead.js';
 
@@ -359,6 +360,45 @@ function buildSnsDetailFromSheet_(openedSpreadsheet) {
       .filter((video) => video.id)
       .sort((a, b) => compareTimestampDesc_(a.published_at, b.published_at))
       .slice(0, SNS_RECENT_VIDEO_LIMIT);
+  }
+
+  // TikTok: the account totals ride the appended account
+  // columns; the videos ride tiktok_media. The "following"
+  // count is not stored in the sheet, so a sheet-built detail
+  // leaves it null — the stored-snapshot fallback carries it.
+  // The watch URL is rebuilt from the video id and the
+  // recorded account username (TIKTOK_USERNAME), exactly as
+  // the collection builds it; without a recorded username the
+  // URLs stay null.
+  const tt = detail.tiktok;
+  tt.followers = num(account.tiktok_followers);
+  tt.total_likes = num(account.tiktok_total_likes);
+  tt.video_count = num(account.tiktok_video_count);
+  const tiktokRows = readHistoryTabObjects_(
+    spreadsheet,
+    'tiktok_media',
+    SNS_HISTORY_TIKTOK_MEDIA_COLUMNS
+  );
+  if (tiktokRows) {
+    const tiktokUsername = tikTokStoredUsername_();
+    tt.recent_videos = tiktokRows
+      .map((row) => {
+        const id = historyTextOrNull_(row.video_id);
+        return {
+          id,
+          title: historyTextOrNull_(row.title),
+          published_at: historyTimestampOrNull_(row.published_at),
+          views: num(row.views),
+          likes: num(row.likes),
+          comments: num(row.comments),
+          shares: num(row.shares),
+          duration_sec: num(row.duration_sec),
+          url: tikTokVideoUrl_(tiktokUsername, id),
+        };
+      })
+      .filter((video) => video.id)
+      .sort((a, b) => compareTimestampDesc_(a.published_at, b.published_at))
+      .slice(0, SNS_TIKTOK_RECENT_VIDEOS_LIMIT);
   }
 
   const ig = detail.instagram;

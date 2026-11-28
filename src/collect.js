@@ -8,6 +8,7 @@ import { refreshMetaTokenIfNeeded_, refreshThreadsTokenIfNeeded, refreshThreadsT
 import { fetchInstagramAccountDetail_, fetchInstagramMediaCount_, fetchInstagramViewsInsights_, joinSnsErrors_ } from './instagramDetail.js';
 import { fetchInstagramDemographics_, fetchInstagramRecentMedia_ } from './instagramMedia.js';
 import { fetchYouTubeChannelDetail_ } from './youtubeDetail.js';
+import { fetchTikTokAccountDetail_ } from './tiktokDetail.js';
 import { appendSnsHistory_ } from './historyWrite.js';
 import { appendBlogHistory_ } from './blogHistory.js';
 import { assembleSnsHistoryResponse_ } from './snsHistoryRead.js';
@@ -139,6 +140,7 @@ function collectSnsCounts() {
   const igDemographics = fetchInstagramDemographics_();
   const igMedia = fetchInstagramRecentMedia_();
   const yt = fetchYouTubeChannelDetail_();
+  const tt = fetchTikTokAccountDetail_();
   const thDetail = fetchThreadsAccountDetail_();
   const thPosts = fetchThreadsRecentPosts_();
   const xDetail = fetchXDetail_();
@@ -150,6 +152,14 @@ function collectSnsCounts() {
       video_count: yt.video_count,
       recent_videos: yt.recent_videos,
       youtube_error: yt.youtube_error,
+    },
+    tiktok: {
+      followers: tt.followers,
+      following: tt.following,
+      total_likes: tt.total_likes,
+      video_count: tt.video_count,
+      recent_videos: tt.recent_videos,
+      tiktok_error: tt.tiktok_error,
     },
     instagram: {
       freddiefujiwara: fetchInstagramFollowers_(SNS_INSTAGRAM_MAIN_ID),
@@ -224,6 +234,9 @@ function collectSnsCounts() {
   }
   if (snapshot.youtube.youtube_error) {
     console.log('YouTube detail error: ' + snapshot.youtube.youtube_error);
+  }
+  if (snapshot.tiktok.tiktok_error) {
+    console.log('TikTok detail error: ' + snapshot.tiktok.tiktok_error);
   }
   if (snapshot.x.x_error) {
     console.log('X detail error: ' + snapshot.x.x_error);
