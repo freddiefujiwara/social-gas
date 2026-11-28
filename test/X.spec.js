@@ -678,10 +678,11 @@ describe('X via tweet-gas (GAS-to-GAS sync)', () => {
         Code.SNS_HISTORY_ACCOUNT_COLUMNS.indexOf('x_api_balance_usd');
       expect(balanceIndex).toBe(xIndex + 1);
       expect(row[balanceIndex]).toBe('');
-      expect(Code.SNS_HISTORY_ACCOUNT_COLUMNS.slice(-3)).toEqual([
+      expect(Code.SNS_HISTORY_ACCOUNT_COLUMNS.slice(-4)).toEqual([
         'tiktok_followers',
         'tiktok_total_likes',
         'tiktok_video_count',
+        'tiktok_following',
       ]);
     });
 

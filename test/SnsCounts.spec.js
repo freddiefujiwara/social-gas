@@ -1057,8 +1057,8 @@ describe('SNS follower counts', () => {
       400, 300, 46, 'total_value', 498, 58, 123456, 42, '', '',
       // The appended TikTok cells: the fixture carries no
       // tiktok section and the mocked collection is
-      // unconfigured, so all three stay empty.
-      '', '', '',
+      // unconfigured, so all four stay empty.
+      '', '', '', '',
     ];
 
     beforeEach(() => {
