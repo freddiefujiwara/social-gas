@@ -862,7 +862,14 @@ describe('TikTok via the Display API', () => {
 
     beforeEach(() => {
       sleepSpy = vi.fn();
-      global.Utilities = { sleep: sleepSpy };
+      global.Utilities = {
+        sleep: sleepSpy,
+        newBlob: vi.fn((bytes, contentType) => ({
+          bytes,
+          contentType,
+          getBytes: () => bytes,
+        })),
+      };
     });
 
     afterEach(() => {
@@ -936,12 +943,13 @@ describe('TikTok via the Display API', () => {
       const [putUrl, putOptions] = global.UrlFetchApp.fetch.mock.calls[1];
       expect(putUrl).toBe('https://example.com/upload/publish-1');
       expect(putOptions.method).toBe('put');
-      expect(putOptions.contentType).toBe('video/mp4');
+      // No manual Content-Length (UrlFetchApp forbids it); the
+      // chunk travels as a Blob carrying the video/mp4 type.
       expect(putOptions.headers).toEqual({
-        'Content-Length': '2048',
         'Content-Range': 'bytes 0-2047/2048',
       });
-      expect(putOptions.payload).toHaveLength(2048);
+      expect(putOptions.payload.contentType).toBe('video/mp4');
+      expect(putOptions.payload.getBytes()).toHaveLength(2048);
       const [statusUrl, statusOptions] =
         global.UrlFetchApp.fetch.mock.calls[2];
       expect(statusUrl).toBe(
@@ -1007,16 +1015,8 @@ describe('TikTok via the Display API', () => {
         'bytes 52428800-67108863/67108864',
       ]);
       expect(
-        putCalls.map(([, options]) => options.headers['Content-Length'])
+        putCalls.map(([, options]) => options.payload.getBytes().length)
       ).toEqual([
-        '10485760',
-        '10485760',
-        '10485760',
-        '10485760',
-        '10485760',
-        '14680064',
-      ]);
-      expect(putCalls.map(([, options]) => options.payload.length)).toEqual([
         10485760, 10485760, 10485760, 10485760, 10485760, 14680064,
       ]);
       // One PROCESSING_UPLOAD read before the inbox took the
@@ -1153,7 +1153,7 @@ describe('TikTok via the Display API', () => {
       const putCall = global.UrlFetchApp.fetch.mock.calls.find(([url]) =>
         url.startsWith('https://example.com/upload/')
       );
-      expect(putCall[1].payload).toEqual(bytes);
+      expect(putCall[1].payload.getBytes()).toEqual(bytes);
       delete global.ScriptApp;
     });
   });
