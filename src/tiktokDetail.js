@@ -69,7 +69,7 @@ const TIKTOK_OAUTH_STATE = 'social-gas';
 const TIKTOK_USER_FIELDS =
   'follower_count,following_count,likes_count,video_count';
 const TIKTOK_VIDEO_FIELDS =
-  'id,create_time,title,duration,view_count,like_count,comment_count,share_count';
+  'id,create_time,title,duration,view_count,like_count,comment_count,share_count,cover_image_url';
 const SNS_TIKTOK_RECENT_VIDEOS_LIMIT = 20;
 // An access token inside its last minute counts as expired, so
 // a collection never starts a pair of API calls on a token that
@@ -328,6 +328,10 @@ function fetchTikTokRecentVideos_(token, username) {
         comments: apiNumberOrNull_(video.comment_count),
         shares: apiNumberOrNull_(video.share_count),
         duration_sec: apiNumberOrNull_(video.duration),
+        cover_url:
+          video.cover_image_url != null && video.cover_image_url !== ''
+            ? String(video.cover_image_url)
+            : null,
         url: tikTokVideoUrl_(username, id),
       };
     })

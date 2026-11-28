@@ -72,6 +72,10 @@ const SNS_HISTORY_ACCOUNT_COLUMNS = [
   'tiktok_followers',
   'tiktok_total_likes',
   'tiktok_video_count',
+  // The TikTok following count, appended after tiktok_video_count
+  // under the same rule, so the sheet-backed detail can serve it
+  // like the live snapshot does.
+  'tiktok_following',
 ];
 const SNS_HISTORY_MEDIA_COLUMNS = [
   'collected_at',
@@ -147,6 +151,11 @@ const SNS_HISTORY_TIKTOK_MEDIA_COLUMNS = [
   'comments',
   'shares',
   'duration_sec',
+  // The cover image URL, appended last on purpose: rows are
+  // read positionally against this list, so a new column may
+  // only ever join at the end. Rows stored before it existed
+  // read back with an empty cover cell.
+  'cover_url',
 ];
 // "x_media" mirrors the other post tabs (collected_at first, the
 // post id as the upsert key). The post URL is not stored — it is
@@ -359,6 +368,7 @@ function buildSnsHistoryAccountRow_(snapshot) {
     snsHistoryNumCell_(tiktok.followers),
     snsHistoryNumCell_(tiktok.total_likes),
     snsHistoryNumCell_(tiktok.video_count),
+    snsHistoryNumCell_(tiktok.following),
   ];
 }
 
@@ -497,6 +507,7 @@ function buildSnsHistoryTikTokMediaRows_(snapshot) {
       snsHistoryNumCell_(item.comments),
       snsHistoryNumCell_(item.shares),
       snsHistoryNumCell_(item.duration_sec),
+      snsHistoryTextCell_(item.cover_url),
     ];
   });
 }

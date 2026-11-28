@@ -363,15 +363,13 @@ function buildSnsDetailFromSheet_(openedSpreadsheet) {
   }
 
   // TikTok: the account totals ride the appended account
-  // columns; the videos ride tiktok_media. The "following"
-  // count is not stored in the sheet, so a sheet-built detail
-  // leaves it null — the stored-snapshot fallback carries it.
-  // The watch URL is rebuilt from the video id and the
-  // recorded account username (TIKTOK_USERNAME), exactly as
-  // the collection builds it; without a recorded username the
-  // URLs stay null.
+  // columns; the videos ride tiktok_media. The watch URL is
+  // rebuilt from the video id and the recorded account
+  // username (TIKTOK_USERNAME), exactly as the collection
+  // builds it; without a recorded username the URLs stay null.
   const tt = detail.tiktok;
   tt.followers = num(account.tiktok_followers);
+  tt.following = num(account.tiktok_following);
   tt.total_likes = num(account.tiktok_total_likes);
   tt.video_count = num(account.tiktok_video_count);
   const tiktokRows = readHistoryTabObjects_(
@@ -393,6 +391,7 @@ function buildSnsDetailFromSheet_(openedSpreadsheet) {
           comments: num(row.comments),
           shares: num(row.shares),
           duration_sec: num(row.duration_sec),
+          cover_url: historyTextOrNull_(row.cover_url),
           url: tikTokVideoUrl_(tiktokUsername, id),
         };
       })

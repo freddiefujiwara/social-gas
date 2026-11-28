@@ -147,6 +147,7 @@ describe('TikTok via the Display API', () => {
           like_count: 300,
           comment_count: 40,
           share_count: 12,
+          cover_image_url: 'https://example.com/covers/7123456789.jpg',
         },
         {
           id: 7123456790,
@@ -233,6 +234,7 @@ describe('TikTok via the Display API', () => {
           comments: 40,
           shares: 12,
           duration_sec: 95,
+          cover_url: 'https://example.com/covers/7123456789.jpg',
           url: 'https://www.tiktok.com/@freddiefujiwara/video/7123456789',
         },
         {
@@ -244,6 +246,7 @@ describe('TikTok via the Display API', () => {
           comments: 0,
           shares: 0,
           duration_sec: null,
+          cover_url: null,
           url: 'https://www.tiktok.com/@freddiefujiwara/video/7123456790',
         },
       ]);
@@ -266,7 +269,7 @@ describe('TikTok via the Display API', () => {
       expect(listUrl).toBe(
         'https://open.tiktokapis.com/v2/video/list/?fields=' +
           encodeURIComponent(
-            'id,create_time,title,duration,view_count,like_count,comment_count,share_count'
+            'id,create_time,title,duration,view_count,like_count,comment_count,share_count,cover_image_url'
           )
       );
       expect(listOptions.method).toBe('post');
@@ -583,6 +586,7 @@ describe('TikTok via the Display API', () => {
             comments: 40,
             shares: 12,
             duration_sec: 95,
+            cover_url: 'https://example.com/covers/7123456789.jpg',
             url: 'https://www.tiktok.com/@freddiefujiwara/video/7123456789',
           },
         ],
@@ -601,10 +605,12 @@ describe('TikTok via the Display API', () => {
       expect(row[columns.indexOf('tiktok_followers')]).toBe(1234);
       expect(row[columns.indexOf('tiktok_total_likes')]).toBe(7890);
       expect(row[columns.indexOf('tiktok_video_count')]).toBe(42);
-      expect(columns.slice(-3)).toEqual([
+      expect(row[columns.indexOf('tiktok_following')]).toBe(56);
+      expect(columns.slice(-4)).toEqual([
         'tiktok_followers',
         'tiktok_total_likes',
         'tiktok_video_count',
+        'tiktok_following',
       ]);
     });
 
@@ -622,7 +628,12 @@ describe('TikTok via the Display API', () => {
           40,
           12,
           95,
+          'https://example.com/covers/7123456789.jpg',
         ],
+      ]);
+      expect(Code.SNS_HISTORY_TIKTOK_MEDIA_COLUMNS.slice(-2)).toEqual([
+        'duration_sec',
+        'cover_url',
       ]);
       expect(
         Code.buildSnsHistoryTikTokMediaRows_({
@@ -648,6 +659,15 @@ describe('TikTok via the Display API', () => {
       expect(sheets.tiktok_media.rows).toHaveLength(2);
       expect(sheets.tiktok_media.rows[1][0]).toBe('2026-11-09T01:00:00.000Z');
       expect(sheets.tiktok_media.rows[1][4]).toBe(6000);
+      // The cover URL rides the appended last cell.
+      const coverIndex =
+        Code.SNS_HISTORY_TIKTOK_MEDIA_COLUMNS.indexOf('cover_url');
+      expect(sheets.tiktok_media.rows[1]).toHaveLength(
+        Code.SNS_HISTORY_TIKTOK_MEDIA_COLUMNS.length
+      );
+      expect(sheets.tiktok_media.rows[1][coverIndex]).toBe(
+        'https://example.com/covers/7123456789.jpg'
+      );
     });
   });
 
@@ -710,6 +730,7 @@ describe('TikTok via the Display API', () => {
           accountRow({
             collected_at: '2026-11-09T06:00:00.000Z',
             tiktok_followers: 1234,
+            tiktok_following: 56,
             tiktok_total_likes: 7890,
             tiktok_video_count: 42,
           }),
@@ -726,6 +747,7 @@ describe('TikTok via the Display API', () => {
             40,
             12,
             95,
+            'https://example.com/covers/7123456789.jpg',
           ],
           [
             '2026-11-09T06:00:00.000Z',
@@ -737,6 +759,7 @@ describe('TikTok via the Display API', () => {
             0,
             0,
             '',
+            '',
           ],
         ],
       });
@@ -744,10 +767,9 @@ describe('TikTok via the Display API', () => {
       const detail = Code.buildSnsDetailFromSheet_();
 
       expect(detail.tiktok.followers).toBe(1234);
+      expect(detail.tiktok.following).toBe(56);
       expect(detail.tiktok.total_likes).toBe(7890);
       expect(detail.tiktok.video_count).toBe(42);
-      // Not stored in the sheet: stays null on a sheet-built detail.
-      expect(detail.tiktok.following).toBeNull();
       // Newest first, URLs rebuilt from the recorded username.
       expect(detail.tiktok.recent_videos).toEqual([
         {
@@ -759,6 +781,7 @@ describe('TikTok via the Display API', () => {
           comments: 0,
           shares: 0,
           duration_sec: null,
+          cover_url: null,
           url: 'https://www.tiktok.com/@freddiefujiwara/video/7123456790',
         },
         {
@@ -770,6 +793,7 @@ describe('TikTok via the Display API', () => {
           comments: 40,
           shares: 12,
           duration_sec: 95,
+          cover_url: 'https://example.com/covers/7123456789.jpg',
           url: 'https://www.tiktok.com/@freddiefujiwara/video/7123456789',
         },
       ]);
@@ -790,6 +814,34 @@ describe('TikTok via the Display API', () => {
 
       expect(detail.tiktok.followers).toBe(1234);
       expect(detail.tiktok.recent_videos).toBeNull();
+    });
+
+    it('round-trips the following count and the cover URLs: fetch, store, read back', () => {
+      configureValidToken();
+      store.TIKTOK_USERNAME = 'freddiefujiwara';
+      routeTikTokApi();
+      const fetched = Code.fetchTikTokAccountDetail_();
+
+      serveTabs({});
+      Code.appendSnsHistory_({
+        collected_at: '2026-11-09T06:00:00.000Z',
+        tiktok: fetched,
+      });
+
+      const detail = Code.buildSnsDetailFromSheet_();
+
+      expect(detail.tiktok.followers).toBe(1234);
+      expect(detail.tiktok.following).toBe(56);
+      expect(detail.tiktok.total_likes).toBe(7890);
+      expect(detail.tiktok.video_count).toBe(42);
+      const byId = Object.fromEntries(
+        detail.tiktok.recent_videos.map((video) => [video.id, video])
+      );
+      expect(byId['7123456789'].cover_url).toBe(
+        'https://example.com/covers/7123456789.jpg'
+      );
+      // The video whose API response carried no cover stays null.
+      expect(byId['7123456790'].cover_url).toBeNull();
     });
   });
 });
