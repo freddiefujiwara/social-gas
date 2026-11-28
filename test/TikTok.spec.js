@@ -119,12 +119,13 @@ describe('TikTok via the Display API', () => {
     store.TIKTOK_ACCESS_TOKEN_EXPIRES_AT = String(NOW + 60 * 60 * 1000);
   };
 
+  // The user-info response as the statistics-only request
+  // returns it: no basic fields, hence no username — the code
+  // falls back to the recorded TIKTOK_USERNAME for the video
+  // URLs (see the fetchTikTokAccountDetail_ tests).
   const USER_INFO = {
     data: {
       user: {
-        open_id: 'open-id-1',
-        display_name: '藤原史和',
-        username: 'freddiefujiwara',
         follower_count: 1234,
         following_count: 56,
         likes_count: 7890,
@@ -209,6 +210,9 @@ describe('TikTok via the Display API', () => {
 
     it('maps the user info and the video list with a still-valid access token', () => {
       configureValidToken();
+      // The statistics-only response carries no username: the
+      // recorded one supplies it (and the video URLs).
+      store.TIKTOK_USERNAME = 'freddiefujiwara';
       routeTikTokApi();
 
       const detail = Code.fetchTikTokAccountDetail_();
@@ -243,7 +247,8 @@ describe('TikTok via the Display API', () => {
           url: 'https://www.tiktok.com/@freddiefujiwara/video/7123456790',
         },
       ]);
-      // The username is recorded for the sheet-backed read side.
+      // The recorded username is untouched: the response
+      // carried none to record.
       expect(store.TIKTOK_USERNAME).toBe('freddiefujiwara');
       // No token call: the stored access token is still valid.
       expect(global.UrlFetchApp.fetch).toHaveBeenCalledTimes(2);
@@ -251,7 +256,7 @@ describe('TikTok via the Display API', () => {
       expect(userUrl).toBe(
         'https://open.tiktokapis.com/v2/user/info/?fields=' +
           encodeURIComponent(
-            'open_id,display_name,username,follower_count,following_count,likes_count,video_count'
+            'follower_count,following_count,likes_count,video_count'
           )
       );
       expect(userOptions.headers).toEqual({
@@ -267,6 +272,47 @@ describe('TikTok via the Display API', () => {
       expect(listOptions.method).toBe('post');
       expect(listOptions.contentType).toBe('application/json');
       expect(JSON.parse(listOptions.payload)).toEqual({ max_count: 20 });
+    });
+
+    it('uses and records a username the response does carry', () => {
+      configureValidToken();
+      store.TIKTOK_USERNAME = 'recorded-name';
+      routeTikTokApi({
+        userInfo: () =>
+          res(200, {
+            data: {
+              user: {
+                username: 'responder-name',
+                follower_count: 1234,
+                following_count: 56,
+                likes_count: 7890,
+                video_count: 42,
+              },
+            },
+            error: { code: 'ok', message: '', log_id: 'log-6' },
+          }),
+      });
+
+      const detail = Code.fetchTikTokAccountDetail_();
+
+      expect(detail.username).toBe('responder-name');
+      expect(store.TIKTOK_USERNAME).toBe('responder-name');
+      expect(detail.recent_videos[0].url).toBe(
+        'https://www.tiktok.com/@responder-name/video/7123456789'
+      );
+    });
+
+    it('leaves the username and the video URLs null while none was ever recorded', () => {
+      configureValidToken();
+      routeTikTokApi();
+
+      const detail = Code.fetchTikTokAccountDetail_();
+
+      expect(detail.followers).toBe(1234);
+      expect(detail.username).toBeNull();
+      expect(detail.recent_videos).toHaveLength(2);
+      expect(detail.recent_videos[0].url).toBeNull();
+      expect(detail.tiktok_error).toBeNull();
     });
 
     it('refreshes an expired access token first and stores the rotated pair', () => {
