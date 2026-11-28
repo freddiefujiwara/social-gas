@@ -1027,6 +1027,28 @@ describe('TikTok via the Display API', () => {
       expect(sleepSpy).toHaveBeenCalledWith(5000);
     });
 
+    it('retries a chunk PUT that dies with a fetch exception', () => {
+      configureValidToken();
+      let putAttempts = 0;
+      routeUploadApi({
+        put: () => {
+          putAttempts++;
+          if (putAttempts < 3) {
+            throw new Error('dummy network failure');
+          }
+          return res(201, '');
+        },
+      });
+
+      const result = Code.uploadTikTokDraftBytes_(dummyBytes(2048));
+
+      expect(result).toEqual({
+        publish_id: 'publish-1',
+        status: 'SEND_TO_USER_INBOX',
+      });
+      expect(putAttempts).toBe(3);
+    });
+
     it('throws a status-stage error carrying the fail_reason on FAILED', () => {
       configureValidToken();
       routeUploadApi({

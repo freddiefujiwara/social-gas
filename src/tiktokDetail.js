@@ -508,9 +508,12 @@ function bootstrapTikTokToken() {
 // chunks, then poll the publish status until TikTok has taken
 // the video into the inbox.
 //
-// Chunking follows the API's rule: below 64MB the whole video
-// goes as a single chunk; at or above it, fixed 10MB chunks
-// (the last one smaller), each PUT with its Content-Range.
+// Chunking: fixed 10MB chunks (the last one smaller), each
+// PUT with its Content-Range. An earlier version sent videos
+// under 64MB as a single chunk, but a single ~21MB PUT from
+// UrlFetchApp died with a fetch exception against TikTok's
+// upload endpoint (2026-11-28, in production), so every video
+// is chunked at 10MB now.
 //
 // Unlike the collection above — which never throws, so one
 // network's failure cannot take the snapshot down — this flow
@@ -524,7 +527,6 @@ const TIKTOK_INBOX_INIT_URL =
   TIKTOK_API_BASE + 'post/publish/inbox/video/init/';
 const TIKTOK_PUBLISH_STATUS_URL =
   TIKTOK_API_BASE + 'post/publish/status/fetch/';
-const TIKTOK_UPLOAD_SINGLE_CHUNK_LIMIT_BYTES = 64 * 1024 * 1024;
 const TIKTOK_UPLOAD_CHUNK_SIZE_BYTES = 10 * 1024 * 1024;
 // The publish status is checked right after the upload and
 // then every 5 seconds, up to 12 checks in all.
@@ -535,12 +537,10 @@ const TIKTOK_UPLOAD_STATUS_INTERVAL_MS = 5000;
 // API's terms (chunk_size / total_chunk_count for the init
 // call).
 function tikTokUploadChunkPlan_(videoSize) {
-  if (videoSize < TIKTOK_UPLOAD_SINGLE_CHUNK_LIMIT_BYTES) {
-    return { chunkSize: videoSize, totalChunkCount: 1 };
-  }
+  const chunkSize = Math.min(TIKTOK_UPLOAD_CHUNK_SIZE_BYTES, videoSize);
   return {
-    chunkSize: TIKTOK_UPLOAD_CHUNK_SIZE_BYTES,
-    totalChunkCount: Math.ceil(videoSize / TIKTOK_UPLOAD_CHUNK_SIZE_BYTES),
+    chunkSize,
+    totalChunkCount: Math.ceil(videoSize / chunkSize),
   };
 }
 
@@ -680,13 +680,22 @@ function uploadTikTokDraftBytes_(bytes) {
   for (let index = 0; index < plan.totalChunkCount; index++) {
     const first = index * plan.chunkSize;
     const last = Math.min(first + plan.chunkSize, videoSize) - 1;
-    const put = putTikTokVideoChunk_(
-      init.uploadUrl,
-      bytes.slice(first, last + 1),
-      first,
-      last,
-      videoSize
-    );
+    // A chunk PUT that dies with a fetch exception is retried
+    // (re-sending the same byte range is safe); an HTTP error
+    // from the endpoint is not.
+    let put = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      put = putTikTokVideoChunk_(
+        init.uploadUrl,
+        bytes.slice(first, last + 1),
+        first,
+        last,
+        videoSize
+      );
+      if (!put.error || !put.error.startsWith('fetch exception')) {
+        break;
+      }
+    }
     if (put.error) {
       throw new Error(
         'TikTok draft upload failed at upload (chunk ' +
@@ -709,10 +718,11 @@ function uploadTikTokDraftBytes_(bytes) {
 // the failed stage in the message.
 /**
  * Downloads a Drive file's bytes through the Drive API with the script's
- * own OAuth token. DriveApp is not used on purpose: this project's GCP
- * project cannot auto-enable the Drive API, so DriveApp calls fail with
- * "Permission denied while enabling APIs: drive", while a plain UrlFetch
- * download works with the granted drive.readonly scope.
+ * own OAuth token. DriveApp is not used on purpose: it failed in this
+ * project while the Drive API was still disabled in the backing GCP
+ * project ("Permission denied while enabling APIs: drive"), and the
+ * UrlFetch path — which only needs the granted drive.readonly scope —
+ * is proven to work, so it stays.
  */
 function fetchDriveFileBytes_(fileId) {
   const response = UrlFetchApp.fetch(
