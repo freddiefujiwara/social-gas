@@ -41,7 +41,8 @@ import { errorMessageText_ } from './historyWrite.js';
 // run logTikTokAuthorizeUrl() in the editor, open the logged
 // URL and approve; TikTok redirects back to this Web App's /exec
 // (TIKTOK_REDIRECT_URI, registered as the app's redirect URI)
-// with a code. Store that code in TIKTOK_AUTH_CODE and run
+// with a code, which the Web App itself stores in
+// TIKTOK_AUTH_CODE (see handleTikTokOAuthCallback_). Then run
 // bootstrapTikTokToken(), which exchanges it for the first
 // access / refresh token pair and deletes the code.
 
@@ -51,6 +52,11 @@ const TIKTOK_AUTHORIZE_URL = 'https://www.tiktok.com/v2/auth/authorize/';
 const TIKTOK_REDIRECT_URI =
   'https://script.google.com/macros/s/AKfycbypis7IqAtM2u0_h7ysiZ5UgztUEwNYJ1zPMnr8IbTBXiyfiapfRMtD_9CxVpc5G8YVzQ/exec';
 const TIKTOK_OAUTH_SCOPES = 'user.info.basic,user.info.stats,video.list';
+// The fixed OAuth state of the authorization below. doGet
+// routes a code back here by this state (checked before the
+// Threads callback, whose state is a saved random value, so
+// the two can never collide).
+const TIKTOK_OAUTH_STATE = 'social-gas';
 const TIKTOK_USER_FIELDS =
   'open_id,display_name,username,follower_count,following_count,likes_count,video_count';
 const TIKTOK_VIDEO_FIELDS =
@@ -389,14 +395,31 @@ function tikTokAuthorizeUrl_() {
     '&response_type=code' +
     '&redirect_uri=' +
     encodeURIComponent(TIKTOK_REDIRECT_URI) +
-    '&state=social-gas'
+    '&state=' +
+    TIKTOK_OAUTH_STATE
   );
+}
+
+// The doGet callback for the authorization above: TikTok
+// redirects the owner's browser back to the Web App's /exec
+// with the state and a code. The code is only stored, as
+// TIKTOK_AUTH_CODE, where bootstrapTikTokToken() picks it up —
+// the owner no longer has to copy the code out of the redirect
+// URL by hand. Returns false (and stores nothing) without a
+// code.
+function handleTikTokOAuthCallback_(code) {
+  if (!code) {
+    return false;
+  }
+  PropertiesService.getScriptProperties().setProperty('TIKTOK_AUTH_CODE', code);
+  return true;
 }
 
 // Editor helper: builds the TikTok authorization URL and logs
 // it. Open the logged URL in a browser and approve; TikTok
-// redirects back to the Web App's /exec with a code — store
-// that code in TIKTOK_AUTH_CODE and run bootstrapTikTokToken().
+// redirects back to the Web App's /exec with a code, which the
+// Web App stores in TIKTOK_AUTH_CODE — then run
+// bootstrapTikTokToken().
 function logTikTokAuthorizeUrl() {
   const url = tikTokAuthorizeUrl_();
   if (!url) {
@@ -448,4 +471,4 @@ function bootstrapTikTokToken() {
 }
 
 
-export { SNS_TIKTOK_RECENT_VIDEOS_LIMIT, TIKTOK_REDIRECT_URI, bootstrapTikTokToken, fetchTikTokAccountDetail_, fetchTikTokRecentVideos_, logTikTokAuthorizeUrl, summarizeTikTokError_, tikTokAuthorizeUrl_, tikTokPublishedAt_, tikTokStoredUsername_, tikTokVideoUrl_ };
+export { SNS_TIKTOK_RECENT_VIDEOS_LIMIT, TIKTOK_OAUTH_STATE, TIKTOK_REDIRECT_URI, bootstrapTikTokToken, fetchTikTokAccountDetail_, fetchTikTokRecentVideos_, handleTikTokOAuthCallback_, logTikTokAuthorizeUrl, summarizeTikTokError_, tikTokAuthorizeUrl_, tikTokPublishedAt_, tikTokStoredUsername_, tikTokVideoUrl_ };
