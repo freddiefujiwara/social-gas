@@ -51,7 +51,14 @@ const TIKTOK_TOKEN_URL = 'https://open.tiktokapis.com/v2/oauth/token/';
 const TIKTOK_AUTHORIZE_URL = 'https://www.tiktok.com/v2/auth/authorize/';
 const TIKTOK_REDIRECT_URI =
   'https://script.google.com/macros/s/AKfycbypis7IqAtM2u0_h7ysiZ5UgztUEwNYJ1zPMnr8IbTBXiyfiapfRMtD_9CxVpc5G8YVzQ/exec';
-const TIKTOK_OAUTH_SCOPES = 'user.info.basic,user.info.stats,video.list';
+// video.upload joins the Display API scopes for the draft
+// upload below (Content Posting API). The stored refresh
+// token only carries the scopes granted when it was issued,
+// so after this addition the one-time authorization has to be
+// re-run (logTikTokAuthorizeUrl + bootstrapTikTokToken) before
+// uploads work; the read side is unaffected.
+const TIKTOK_OAUTH_SCOPES =
+  'user.info.basic,user.info.stats,video.list,video.upload';
 // The fixed OAuth state of the authorization below. doGet
 // routes a code back here by this state (checked before the
 // Threads callback, whose state is a saved random value, so
@@ -491,5 +498,226 @@ function bootstrapTikTokToken() {
   return true;
 }
 
+// --- TikTok draft upload (Content Posting API) ---
+// Sends a video into the authorized account's TikTok inbox as
+// a draft (the publish status SEND_TO_USER_INBOX): the owner
+// reviews it and posts it from the TikTok app, so nothing goes
+// public from here. The flow is the FILE_UPLOAD source of the
+// Content Posting API: initialize (which hands back a
+// publish_id and a one-shot upload URL), PUT the bytes in
+// chunks, then poll the publish status until TikTok has taken
+// the video into the inbox.
+//
+// Chunking follows the API's rule: below 64MB the whole video
+// goes as a single chunk; at or above it, fixed 10MB chunks
+// (the last one smaller), each PUT with its Content-Range.
+//
+// Unlike the collection above — which never throws, so one
+// network's failure cannot take the snapshot down — this flow
+// throws: it runs from the editor on demand, and every failure
+// message names the stage that failed (init / upload /
+// status). The video.upload scope is required (see
+// TIKTOK_OAUTH_SCOPES); without it the init call is refused
+// with scope_not_authorized.
 
-export { SNS_TIKTOK_RECENT_VIDEOS_LIMIT, TIKTOK_OAUTH_STATE, TIKTOK_REDIRECT_URI, bootstrapTikTokToken, fetchTikTokAccountDetail_, fetchTikTokRecentVideos_, handleTikTokOAuthCallback_, logTikTokAuthorizeUrl, summarizeTikTokError_, tikTokAuthorizeUrl_, tikTokPublishedAt_, tikTokStoredUsername_, tikTokVideoUrl_ };
+const TIKTOK_INBOX_INIT_URL =
+  TIKTOK_API_BASE + 'post/publish/inbox/video/init/';
+const TIKTOK_PUBLISH_STATUS_URL =
+  TIKTOK_API_BASE + 'post/publish/status/fetch/';
+const TIKTOK_UPLOAD_SINGLE_CHUNK_LIMIT_BYTES = 64 * 1024 * 1024;
+const TIKTOK_UPLOAD_CHUNK_SIZE_BYTES = 10 * 1024 * 1024;
+// The publish status is checked right after the upload and
+// then every 5 seconds, up to 12 checks in all.
+const TIKTOK_UPLOAD_STATUS_CHECKS = 12;
+const TIKTOK_UPLOAD_STATUS_INTERVAL_MS = 5000;
+
+// The chunk plan for one video of the given size, in the
+// API's terms (chunk_size / total_chunk_count for the init
+// call).
+function tikTokUploadChunkPlan_(videoSize) {
+  if (videoSize < TIKTOK_UPLOAD_SINGLE_CHUNK_LIMIT_BYTES) {
+    return { chunkSize: videoSize, totalChunkCount: 1 };
+  }
+  return {
+    chunkSize: TIKTOK_UPLOAD_CHUNK_SIZE_BYTES,
+    totalChunkCount: Math.ceil(videoSize / TIKTOK_UPLOAD_CHUNK_SIZE_BYTES),
+  };
+}
+
+// The init step: reserves the publish and returns its
+// publish_id and upload URL. Throws an init-stage error.
+function initTikTokInboxUpload_(token, videoSize, plan) {
+  const res = fetchTikTokJson_(
+    TIKTOK_INBOX_INIT_URL,
+    {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify({
+        source_info: {
+          source: 'FILE_UPLOAD',
+          video_size: videoSize,
+          chunk_size: plan.chunkSize,
+          total_chunk_count: plan.totalChunkCount,
+        },
+      }),
+    },
+    token
+  );
+  if (res.error) {
+    throw new Error('TikTok draft upload failed at init: ' + res.error);
+  }
+  const data = (res.data && res.data.data) || {};
+  if (!data.publish_id || !data.upload_url) {
+    throw new Error(
+      'TikTok draft upload failed at init: response had no publish_id / upload_url'
+    );
+  }
+  return {
+    publishId: String(data.publish_id),
+    uploadUrl: String(data.upload_url),
+  };
+}
+
+// One chunk PUT against the upload URL (not a JSON call: the
+// endpoint answers 206 for an interim chunk and 201 for the
+// final one, with no body to speak of). Returns { error } and
+// never throws, like the other fetch helpers.
+function putTikTokVideoChunk_(uploadUrl, chunk, first, last, totalSize) {
+  let res;
+  try {
+    res = UrlFetchApp.fetch(uploadUrl, {
+      method: 'put',
+      contentType: 'video/mp4',
+      headers: {
+        'Content-Length': String(chunk.length),
+        'Content-Range': 'bytes ' + first + '-' + last + '/' + totalSize,
+      },
+      payload: chunk,
+      muteHttpExceptions: true,
+    });
+  } catch (err) {
+    return {
+      error: 'fetch exception (' + ((err && err.name) || 'Error') + ')',
+    };
+  }
+  const status = res.getResponseCode();
+  if (status === 201 || status === 206) {
+    return { error: null };
+  }
+  return { error: tikTokApiErrorSummary_(status, res.getContentText()) };
+}
+
+// One publish-status read: { status, failReason, error }. The
+// statuses that matter here are SEND_TO_USER_INBOX (done),
+// FAILED (with fail_reason) and the PROCESSING_* family in
+// between.
+function fetchTikTokPublishStatus_(token, publishId) {
+  const res = fetchTikTokJson_(
+    TIKTOK_PUBLISH_STATUS_URL,
+    {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify({ publish_id: publishId }),
+    },
+    token
+  );
+  if (res.error) {
+    return { status: null, failReason: null, error: res.error };
+  }
+  const data = (res.data && res.data.data) || {};
+  return {
+    status: data.status != null ? String(data.status) : null,
+    failReason: data.fail_reason != null ? String(data.fail_reason) : null,
+    error: null,
+  };
+}
+
+// Polls the publish status until TikTok takes the video into
+// the inbox; returns 'SEND_TO_USER_INBOX'. Throws a
+// status-stage error on FAILED, on a failed status read, and
+// when the checks run out.
+function waitForTikTokInboxDelivery_(token, publishId) {
+  for (let check = 0; check < TIKTOK_UPLOAD_STATUS_CHECKS; check++) {
+    if (check > 0) {
+      Utilities.sleep(TIKTOK_UPLOAD_STATUS_INTERVAL_MS);
+    }
+    const res = fetchTikTokPublishStatus_(token, publishId);
+    if (res.error) {
+      throw new Error('TikTok draft upload failed at status: ' + res.error);
+    }
+    if (res.status === 'SEND_TO_USER_INBOX') {
+      return res.status;
+    }
+    if (res.status === 'FAILED') {
+      throw new Error(
+        'TikTok draft upload failed at status: publish FAILED' +
+          (res.failReason ? ' (' + res.failReason + ')' : '')
+      );
+    }
+  }
+  throw new Error(
+    'TikTok draft upload failed at status: no SEND_TO_USER_INBOX after ' +
+      TIKTOK_UPLOAD_STATUS_CHECKS +
+      ' checks'
+  );
+}
+
+// Uploads one video's bytes as an inbox draft and returns
+// { publish_id, status } once TikTok reports
+// SEND_TO_USER_INBOX. Throws with the failed stage in the
+// message (init / upload / status).
+function uploadTikTokDraftBytes_(bytes) {
+  const videoSize = bytes ? bytes.length : 0;
+  if (!videoSize) {
+    throw new Error('TikTok draft upload failed at init: the video is empty');
+  }
+  const auth = ensureTikTokAccessToken_();
+  if (!auth.token) {
+    throw new Error('TikTok draft upload failed at init: ' + auth.error);
+  }
+  const plan = tikTokUploadChunkPlan_(videoSize);
+  const init = initTikTokInboxUpload_(auth.token, videoSize, plan);
+  for (let index = 0; index < plan.totalChunkCount; index++) {
+    const first = index * plan.chunkSize;
+    const last = Math.min(first + plan.chunkSize, videoSize) - 1;
+    const put = putTikTokVideoChunk_(
+      init.uploadUrl,
+      bytes.slice(first, last + 1),
+      first,
+      last,
+      videoSize
+    );
+    if (put.error) {
+      throw new Error(
+        'TikTok draft upload failed at upload (chunk ' +
+          (index + 1) +
+          ' of ' +
+          plan.totalChunkCount +
+          '): ' +
+          put.error
+      );
+    }
+  }
+  const status = waitForTikTokInboxDelivery_(auth.token, init.publishId);
+  return { publish_id: init.publishId, status };
+}
+
+// Editor helper: sends the Drive file (a video) to the
+// authorized account's TikTok inbox as a draft; the owner
+// reviews and posts it from the TikTok app. Logs and returns
+// the publish_id and the final status; failures throw with
+// the failed stage in the message.
+function uploadTikTokDraftFromDrive(fileId) {
+  const bytes = DriveApp.getFileById(fileId).getBlob().getBytes();
+  const result = uploadTikTokDraftBytes_(bytes);
+  console.log(
+    'TikTok draft sent to inbox: publish_id=' +
+      result.publish_id +
+      ' status=' +
+      result.status
+  );
+  return result;
+}
+
+
+export { SNS_TIKTOK_RECENT_VIDEOS_LIMIT, TIKTOK_OAUTH_STATE, TIKTOK_REDIRECT_URI, bootstrapTikTokToken, fetchTikTokAccountDetail_, fetchTikTokRecentVideos_, handleTikTokOAuthCallback_, logTikTokAuthorizeUrl, summarizeTikTokError_, tikTokAuthorizeUrl_, tikTokPublishedAt_, tikTokStoredUsername_, tikTokVideoUrl_, uploadTikTokDraftBytes_, uploadTikTokDraftFromDrive };
