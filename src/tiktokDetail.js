@@ -508,12 +508,14 @@ function bootstrapTikTokToken() {
 // chunks, then poll the publish status until TikTok has taken
 // the video into the inbox.
 //
-// Chunking: fixed 10MB chunks (the last one smaller), each
-// PUT with its Content-Range. An earlier version sent videos
-// under 64MB as a single chunk, but a single ~21MB PUT from
-// UrlFetchApp died with a fetch exception against TikTok's
-// upload endpoint (2026-11-28, in production), so every video
-// is chunked at 10MB now.
+// Chunking follows TikTok's Media Transfer Guide: chunks
+// are 5MB..64MB, total_chunk_count is video_size divided by
+// chunk_size rounded DOWN, and the trailing bytes merge
+// into the final chunk (which may exceed chunk_size, up to
+// 128MB). So the plan is: 10MB chunks, count =
+// floor(size / 10MB), the final chunk takes the rest
+// (10MB..just under 20MB). A video that fits in one chunk
+// (under 10MB) goes whole, with chunk_size = its size.
 //
 // Unlike the collection above — which never throws, so one
 // network's failure cannot take the snapshot down — this flow
@@ -537,10 +539,16 @@ const TIKTOK_UPLOAD_STATUS_INTERVAL_MS = 5000;
 // API's terms (chunk_size / total_chunk_count for the init
 // call).
 function tikTokUploadChunkPlan_(videoSize) {
-  const chunkSize = Math.min(TIKTOK_UPLOAD_CHUNK_SIZE_BYTES, videoSize);
+  const totalChunkCount = Math.max(
+    1,
+    Math.floor(videoSize / TIKTOK_UPLOAD_CHUNK_SIZE_BYTES)
+  );
   return {
-    chunkSize,
-    totalChunkCount: Math.ceil(videoSize / chunkSize),
+    chunkSize:
+      totalChunkCount === 1
+        ? videoSize
+        : TIKTOK_UPLOAD_CHUNK_SIZE_BYTES,
+    totalChunkCount,
   };
 }
 
@@ -679,7 +687,12 @@ function uploadTikTokDraftBytes_(bytes) {
   const init = initTikTokInboxUpload_(auth.token, videoSize, plan);
   for (let index = 0; index < plan.totalChunkCount; index++) {
     const first = index * plan.chunkSize;
-    const last = Math.min(first + plan.chunkSize, videoSize) - 1;
+    // The final chunk absorbs the trailing bytes (see the
+    // chunking note above), so it runs to the end of the file.
+    const last =
+      index === plan.totalChunkCount - 1
+        ? videoSize - 1
+        : first + plan.chunkSize - 1;
     // A chunk PUT that dies with a fetch exception is retried
     // (re-sending the same byte range is safe); an HTTP error
     // from the endpoint is not.

@@ -963,7 +963,7 @@ describe('TikTok via the Display API', () => {
         put: () => {
           putCount += 1;
           // 206 for the interim chunks, 201 for the final one.
-          return res(putCount < 7 ? 206 : 201, '');
+          return res(putCount < 6 ? 206 : 201, '');
         },
         status: () => {
           statusCount += 1;
@@ -989,13 +989,13 @@ describe('TikTok via the Display API', () => {
           source: 'FILE_UPLOAD',
           video_size: 67108864,
           chunk_size: 10485760,
-          total_chunk_count: 7,
+          total_chunk_count: 6,
         },
       });
       const putCalls = global.UrlFetchApp.fetch.mock.calls.filter(([url]) =>
         url.startsWith('https://example.com/upload/')
       );
-      expect(putCalls).toHaveLength(7);
+      expect(putCalls).toHaveLength(6);
       expect(
         putCalls.map(([, options]) => options.headers['Content-Range'])
       ).toEqual([
@@ -1004,8 +1004,7 @@ describe('TikTok via the Display API', () => {
         'bytes 20971520-31457279/67108864',
         'bytes 31457280-41943039/67108864',
         'bytes 41943040-52428799/67108864',
-        'bytes 52428800-62914559/67108864',
-        'bytes 62914560-67108863/67108864',
+        'bytes 52428800-67108863/67108864',
       ]);
       expect(
         putCalls.map(([, options]) => options.headers['Content-Length'])
@@ -1015,11 +1014,10 @@ describe('TikTok via the Display API', () => {
         '10485760',
         '10485760',
         '10485760',
-        '10485760',
-        '4194304',
+        '14680064',
       ]);
       expect(putCalls.map(([, options]) => options.payload.length)).toEqual([
-        10485760, 10485760, 10485760, 10485760, 10485760, 10485760, 4194304,
+        10485760, 10485760, 10485760, 10485760, 10485760, 14680064,
       ]);
       // One PROCESSING_UPLOAD read before the inbox took the
       // video: exactly one 5-second poll sleep.
