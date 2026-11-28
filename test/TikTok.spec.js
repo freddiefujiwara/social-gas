@@ -176,7 +176,7 @@ describe('TikTok via the Display API', () => {
               expires_in: 86400,
               refresh_token: 'new-refresh-token',
               open_id: 'open-id-1',
-              scope: 'user.info.basic,user.info.stats,video.list',
+              scope: 'user.info.basic,user.info.stats,video.list,video.upload',
               token_type: 'Bearer',
             });
       }
@@ -425,7 +425,7 @@ describe('TikTok via the Display API', () => {
       const url = Code.tikTokAuthorizeUrl_();
       expect(url).toBe(
         'https://www.tiktok.com/v2/auth/authorize/?client_key=client-key' +
-          '&scope=user.info.basic,user.info.stats,video.list' +
+          '&scope=user.info.basic,user.info.stats,video.list,video.upload' +
           '&response_type=code' +
           '&redirect_uri=' +
           encodeURIComponent(
@@ -842,6 +842,284 @@ describe('TikTok via the Display API', () => {
       );
       // The video whose API response carried no cover stays null.
       expect(byId['7123456790'].cover_url).toBeNull();
+    });
+  });
+
+  describe('draft upload (Content Posting API)', () => {
+    const INIT_OK = {
+      data: {
+        publish_id: 'publish-1',
+        upload_url: 'https://example.com/upload/publish-1',
+      },
+      error: { code: 'ok', message: '', log_id: 'log-up-1' },
+    };
+    const STATUS_INBOX = {
+      data: { status: 'SEND_TO_USER_INBOX' },
+      error: { code: 'ok', message: '', log_id: 'log-up-2' },
+    };
+
+    let sleepSpy;
+
+    beforeEach(() => {
+      sleepSpy = vi.fn();
+      global.Utilities = { sleep: sleepSpy };
+    });
+
+    afterEach(() => {
+      delete global.Utilities;
+      delete global.DriveApp;
+    });
+
+    const routeUploadApi = (overrides = {}) => {
+      fetchHandler = (url, options) => {
+        if (
+          url.startsWith(
+            'https://open.tiktokapis.com/v2/post/publish/inbox/video/init/'
+          )
+        ) {
+          return overrides.init
+            ? overrides.init(url, options)
+            : res(200, INIT_OK);
+        }
+        if (url.startsWith('https://example.com/upload/')) {
+          return overrides.put ? overrides.put(url, options) : res(201, '');
+        }
+        if (
+          url.startsWith(
+            'https://open.tiktokapis.com/v2/post/publish/status/fetch/'
+          )
+        ) {
+          return overrides.status
+            ? overrides.status(url, options)
+            : res(200, STATUS_INBOX);
+        }
+        throw new Error('unexpected fetch: ' + url);
+      };
+    };
+
+    const dummyBytes = (size) =>
+      Array.from({ length: size }, (_, i) => i % 251);
+
+    it('asks for the video.upload scope in the authorize URL', () => {
+      store.TIKTOK_CLIENT_KEY = 'client-key';
+      expect(Code.tikTokAuthorizeUrl_()).toContain('video.upload');
+    });
+
+    it('uploads a small video as a single chunk and returns the publish id', () => {
+      configureValidToken();
+      routeUploadApi();
+
+      const result = Code.uploadTikTokDraftBytes_(dummyBytes(2048));
+
+      expect(result).toEqual({
+        publish_id: 'publish-1',
+        status: 'SEND_TO_USER_INBOX',
+      });
+      expect(global.UrlFetchApp.fetch).toHaveBeenCalledTimes(3);
+      const [initUrl, initOptions] = global.UrlFetchApp.fetch.mock.calls[0];
+      expect(initUrl).toBe(
+        'https://open.tiktokapis.com/v2/post/publish/inbox/video/init/'
+      );
+      expect(initOptions.method).toBe('post');
+      expect(initOptions.contentType).toBe('application/json');
+      expect(initOptions.headers).toEqual({
+        Authorization: 'Bearer access-token',
+      });
+      expect(JSON.parse(initOptions.payload)).toEqual({
+        source_info: {
+          source: 'FILE_UPLOAD',
+          video_size: 2048,
+          chunk_size: 2048,
+          total_chunk_count: 1,
+        },
+      });
+      const [putUrl, putOptions] = global.UrlFetchApp.fetch.mock.calls[1];
+      expect(putUrl).toBe('https://example.com/upload/publish-1');
+      expect(putOptions.method).toBe('put');
+      expect(putOptions.contentType).toBe('video/mp4');
+      expect(putOptions.headers).toEqual({
+        'Content-Length': '2048',
+        'Content-Range': 'bytes 0-2047/2048',
+      });
+      expect(putOptions.payload).toHaveLength(2048);
+      const [statusUrl, statusOptions] =
+        global.UrlFetchApp.fetch.mock.calls[2];
+      expect(statusUrl).toBe(
+        'https://open.tiktokapis.com/v2/post/publish/status/fetch/'
+      );
+      expect(JSON.parse(statusOptions.payload)).toEqual({
+        publish_id: 'publish-1',
+      });
+      // The first status check already found the video in the
+      // inbox: no polling sleep was needed.
+      expect(sleepSpy).not.toHaveBeenCalled();
+    });
+
+    it('splits a 64MB video into 10MB chunks with per-chunk ranges', () => {
+      configureValidToken();
+      let putCount = 0;
+      let statusCount = 0;
+      routeUploadApi({
+        put: () => {
+          putCount += 1;
+          // 206 for the interim chunks, 201 for the final one.
+          return res(putCount < 7 ? 206 : 201, '');
+        },
+        status: () => {
+          statusCount += 1;
+          return statusCount < 2
+            ? res(200, {
+                data: { status: 'PROCESSING_UPLOAD' },
+                error: { code: 'ok', message: '', log_id: 'log-up-3' },
+              })
+            : res(200, STATUS_INBOX);
+        },
+      });
+
+      const size = 64 * 1024 * 1024;
+      const result = Code.uploadTikTokDraftBytes_(new Uint8Array(size));
+
+      expect(result).toEqual({
+        publish_id: 'publish-1',
+        status: 'SEND_TO_USER_INBOX',
+      });
+      const [, initOptions] = global.UrlFetchApp.fetch.mock.calls[0];
+      expect(JSON.parse(initOptions.payload)).toEqual({
+        source_info: {
+          source: 'FILE_UPLOAD',
+          video_size: 67108864,
+          chunk_size: 10485760,
+          total_chunk_count: 7,
+        },
+      });
+      const putCalls = global.UrlFetchApp.fetch.mock.calls.filter(([url]) =>
+        url.startsWith('https://example.com/upload/')
+      );
+      expect(putCalls).toHaveLength(7);
+      expect(
+        putCalls.map(([, options]) => options.headers['Content-Range'])
+      ).toEqual([
+        'bytes 0-10485759/67108864',
+        'bytes 10485760-20971519/67108864',
+        'bytes 20971520-31457279/67108864',
+        'bytes 31457280-41943039/67108864',
+        'bytes 41943040-52428799/67108864',
+        'bytes 52428800-62914559/67108864',
+        'bytes 62914560-67108863/67108864',
+      ]);
+      expect(
+        putCalls.map(([, options]) => options.headers['Content-Length'])
+      ).toEqual([
+        '10485760',
+        '10485760',
+        '10485760',
+        '10485760',
+        '10485760',
+        '10485760',
+        '4194304',
+      ]);
+      expect(putCalls.map(([, options]) => options.payload.length)).toEqual([
+        10485760, 10485760, 10485760, 10485760, 10485760, 10485760, 4194304,
+      ]);
+      // One PROCESSING_UPLOAD read before the inbox took the
+      // video: exactly one 5-second poll sleep.
+      expect(sleepSpy).toHaveBeenCalledTimes(1);
+      expect(sleepSpy).toHaveBeenCalledWith(5000);
+    });
+
+    it('throws a status-stage error carrying the fail_reason on FAILED', () => {
+      configureValidToken();
+      routeUploadApi({
+        status: () =>
+          res(200, {
+            data: { status: 'FAILED', fail_reason: 'dummy_fail_reason' },
+            error: { code: 'ok', message: '', log_id: 'log-up-4' },
+          }),
+      });
+
+      expect(() => Code.uploadTikTokDraftBytes_(dummyBytes(100))).toThrow(
+        /failed at status: publish FAILED \(dummy_fail_reason\)/
+      );
+    });
+
+    it('throws an init-stage error and uploads nothing when init is refused', () => {
+      configureValidToken();
+      routeUploadApi({
+        init: () =>
+          res(403, {
+            error: {
+              code: 'scope_not_authorized',
+              message: 'Scope not authorized.',
+              log_id: 'log-up-5',
+            },
+          }),
+      });
+
+      expect(() => Code.uploadTikTokDraftBytes_(dummyBytes(100))).toThrow(
+        /failed at init: HTTP 403 code=scope_not_authorized/
+      );
+      expect(global.UrlFetchApp.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('throws an upload-stage error when a chunk PUT fails', () => {
+      configureValidToken();
+      routeUploadApi({
+        put: () =>
+          res(500, {
+            error: {
+              code: 'dummy_error',
+              message: 'Dummy failure.',
+              log_id: 'log-up-6',
+            },
+          }),
+      });
+
+      expect(() => Code.uploadTikTokDraftBytes_(dummyBytes(100))).toThrow(
+        /failed at upload \(chunk 1 of 1\): HTTP 500 code=dummy_error/
+      );
+    });
+
+    it('throws a status-stage error when the inbox never takes the video', () => {
+      configureValidToken();
+      routeUploadApi({
+        status: () =>
+          res(200, {
+            data: { status: 'PROCESSING_UPLOAD' },
+            error: { code: 'ok', message: '', log_id: 'log-up-7' },
+          }),
+      });
+
+      expect(() => Code.uploadTikTokDraftBytes_(dummyBytes(100))).toThrow(
+        /failed at status: no SEND_TO_USER_INBOX after 12 checks/
+      );
+      const statusCalls = global.UrlFetchApp.fetch.mock.calls.filter(
+        ([url]) => url.includes('/post/publish/status/fetch/')
+      );
+      expect(statusCalls).toHaveLength(12);
+      expect(sleepSpy).toHaveBeenCalledTimes(11);
+    });
+
+    it('reads the video bytes from Drive in uploadTikTokDraftFromDrive', () => {
+      configureValidToken();
+      routeUploadApi();
+      const bytes = dummyBytes(512);
+      global.DriveApp = {
+        getFileById: vi.fn(() => ({
+          getBlob: () => ({ getBytes: () => bytes }),
+        })),
+      };
+
+      const result = Code.uploadTikTokDraftFromDrive('dummy-file-id');
+
+      expect(global.DriveApp.getFileById).toHaveBeenCalledWith(
+        'dummy-file-id'
+      );
+      expect(result).toEqual({
+        publish_id: 'publish-1',
+        status: 'SEND_TO_USER_INBOX',
+      });
+      const [, putOptions] = global.UrlFetchApp.fetch.mock.calls[1];
+      expect(putOptions.payload).toEqual(bytes);
     });
   });
 });
