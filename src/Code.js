@@ -20,6 +20,7 @@ export * from './instagramMedia.js';
 export * from './mediaDuration.js';
 export * from './mediaDurationDebug.js';
 export * from './youtubeDetail.js';
+export * from './tiktokDetail.js';
 export * from './historyWrite.js';
 export * from './blogHistory.js';
 export * from './snsHistoryRead.js';

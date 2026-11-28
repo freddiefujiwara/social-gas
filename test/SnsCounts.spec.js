@@ -476,6 +476,7 @@ describe('SNS follower counts', () => {
         },
         threads: { followers: null },
         x: { followers: null },
+        tiktok: { followers: null },
       });
     });
 
@@ -506,6 +507,7 @@ describe('SNS follower counts', () => {
         },
         threads: { followers: 252 },
         x: { followers: null },
+        tiktok: { followers: null },
       });
     });
 
@@ -1053,6 +1055,10 @@ describe('SNS follower counts', () => {
     const expectedAccountValues = [
       1988, 59, 252, 8, 2248, 2404, 10000, 96.3, 5000, 1200, 3000, 2000, 300,
       400, 300, 46, 'total_value', 498, 58, 123456, 42, '', '',
+      // The appended TikTok cells: the fixture carries no
+      // tiktok section and the mocked collection is
+      // unconfigured, so all three stay empty.
+      '', '', '',
     ];
 
     beforeEach(() => {

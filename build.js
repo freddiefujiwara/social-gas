@@ -21,6 +21,7 @@ const MODULES = [
   "mediaDuration.js",
   "mediaDurationDebug.js",
   "youtubeDetail.js",
+  "tiktokDetail.js",
   "historyWrite.js",
   "blogHistory.js",
   "snsHistoryRead.js",

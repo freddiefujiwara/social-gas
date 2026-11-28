@@ -13,7 +13,7 @@ import { dedupeXDailyPosts_, xDailyDateKey_ } from './xDetail.js';
 //   - "account" is the one time series: one appended row per
 //     collection, the input of the /ga trend charts.
 //   - Every post-shaped tab ("media", "threads_media",
-//     "youtube_media"), the "daily" tab, the follower-demographics
+//     "youtube_media", "tiktok_media"), the "daily" tab, the follower-demographics
 //     tab ("ig_demographics") and the Threads account-metrics tab
 //     ("threads_account") hold ONE row per key (media_id / post_id /
 //     video_id / date / breakdown segment / metric) and are
@@ -66,6 +66,12 @@ const SNS_HISTORY_ACCOUNT_COLUMNS = [
   // The X API credit balance (USD) from the tweet-gas sync,
   // appended after x_followers under the same rule.
   'x_api_balance_usd',
+  // The TikTok account totals, appended after x_api_balance_usd
+  // under the same rule. TikTok followers deliberately stay out
+  // of total_followers (see buildSnsHistoryAccountRow_).
+  'tiktok_followers',
+  'tiktok_total_likes',
+  'tiktok_video_count',
 ];
 const SNS_HISTORY_MEDIA_COLUMNS = [
   'collected_at',
@@ -124,6 +130,22 @@ const SNS_HISTORY_YOUTUBE_MEDIA_COLUMNS = [
   'views',
   'likes',
   'comments',
+  'duration_sec',
+];
+// "tiktok_media" mirrors "youtube_media" (collected_at first,
+// the video id as the upsert key) with the share count TikTok
+// reports on top. The watch URL is not stored — it is rebuilt
+// from the id and the recorded account username on the read
+// side, like youtube_media.
+const SNS_HISTORY_TIKTOK_MEDIA_COLUMNS = [
+  'collected_at',
+  'video_id',
+  'published_at',
+  'title',
+  'views',
+  'likes',
+  'comments',
+  'shares',
   'duration_sec',
 ];
 // "x_media" mirrors the other post tabs (collected_at first, the
@@ -299,6 +321,7 @@ function buildSnsHistoryAccountRow_(snapshot) {
   const instagram = snap.instagram || {};
   const threads = snap.threads || {};
   const x = snap.x || {};
+  const tiktok = snap.tiktok || {};
   const interactions = instagram.interactions_30d || {};
   const totalParts = [
     snsNumberOrNull_(instagram.freddiefujiwara),
@@ -333,6 +356,9 @@ function buildSnsHistoryAccountRow_(snapshot) {
     snsHistoryNumCell_(youtube.video_count),
     snsHistoryNumCell_(x.followers),
     snsHistoryNumCell_(x.api_balance_usd),
+    snsHistoryNumCell_(tiktok.followers),
+    snsHistoryNumCell_(tiktok.total_likes),
+    snsHistoryNumCell_(tiktok.video_count),
   ];
 }
 
@@ -444,6 +470,32 @@ function buildSnsHistoryYouTubeMediaRows_(snapshot) {
       snsHistoryNumCell_(item.views),
       snsHistoryNumCell_(item.likes),
       snsHistoryNumCell_(item.comments),
+      snsHistoryNumCell_(item.duration_sec),
+    ];
+  });
+}
+
+// One "tiktok_media" row per entry of tiktok.recent_videos
+// (an empty list while TikTok is unconfigured or its fetch
+// failed and the snapshot carries null), mirroring
+// buildSnsHistoryYouTubeMediaRows_ with the share count added.
+function buildSnsHistoryTikTokMediaRows_(snapshot) {
+  const snap = snapshot || {};
+  const tiktok = snap.tiktok || {};
+  const videos = Array.isArray(tiktok.recent_videos)
+    ? tiktok.recent_videos
+    : [];
+  return videos.map((entry) => {
+    const item = entry || {};
+    return [
+      snsHistoryTextCell_(snap.collected_at),
+      snsHistoryTextCell_(item.id),
+      snsHistoryTextCell_(item.published_at),
+      snsHistoryTextCell_(item.title),
+      snsHistoryNumCell_(item.views),
+      snsHistoryNumCell_(item.likes),
+      snsHistoryNumCell_(item.comments),
+      snsHistoryNumCell_(item.shares),
       snsHistoryNumCell_(item.duration_sec),
     ];
   });
@@ -755,6 +807,13 @@ function appendSnsHistory_(snapshot) {
     );
     upsertSnsHistorySheet_(
       spreadsheet,
+      'tiktok_media',
+      SNS_HISTORY_TIKTOK_MEDIA_COLUMNS,
+      1,
+      buildSnsHistoryTikTokMediaRows_(snapshot)
+    );
+    upsertSnsHistorySheet_(
+      spreadsheet,
       'x_media',
       SNS_HISTORY_X_MEDIA_COLUMNS,
       1,
@@ -789,4 +848,4 @@ function appendSnsHistory_(snapshot) {
 }
 
 
-export { errorMessageText_, BLOG_POSTS_DAILY_WINDOW_DAYS, BLOG_SPEED_CUMULATIVE_TAB, BLOG_TOTALS_WINDOW_KEY, SNS_HISTORY_ACCOUNT_COLUMNS, SNS_HISTORY_BLOG_DAILY_COLUMNS, SNS_HISTORY_BLOG_PAGES_COLUMNS, SNS_HISTORY_BLOG_POSTS_COLUMNS, SNS_HISTORY_BLOG_POSTS_DAILY_COLUMNS, SNS_HISTORY_BLOG_SCROLL_COLUMNS, SNS_HISTORY_BLOG_SOURCES_COLUMNS, SNS_HISTORY_BLOG_SPEED_COLUMNS, SNS_HISTORY_BLOG_SPEED_CUMULATIVE_COLUMNS, SNS_HISTORY_BLOG_TOTALS_COLUMNS, SNS_HISTORY_DAILY_COLUMNS, SNS_HISTORY_DEMOGRAPHICS_COLUMNS, SNS_HISTORY_MEDIA_COLUMNS, SNS_HISTORY_SHEET_ID_PROPERTY, SNS_HISTORY_THREADS_ACCOUNT_COLUMNS, SNS_HISTORY_THREADS_MEDIA_COLUMNS, SNS_HISTORY_X_DAILY_COLUMNS, SNS_HISTORY_X_MEDIA_COLUMNS, SNS_HISTORY_YOUTUBE_MEDIA_COLUMNS, appendSnsHistory_, buildSnsHistoryAccountRow_, buildSnsHistoryDailyRows_, buildSnsHistoryDemographicsRows_, buildSnsHistoryMediaRows_, buildSnsHistoryThreadsAccountRows_, buildSnsHistoryThreadsMediaRows_, buildSnsHistoryXDailyRows_, buildSnsHistoryXMediaRows_, buildSnsHistoryYouTubeMediaRows_, ensureSnsHistorySheet_, mergeSnsHistoryRows_, readSnsHistoryRows_, snsHistoryKeyCell_, snsHistoryNumCell_, snsHistoryTextCell_, summarizeSnsHistoryError_, upsertSnsHistorySheet_ };
+export { errorMessageText_, BLOG_POSTS_DAILY_WINDOW_DAYS, BLOG_SPEED_CUMULATIVE_TAB, BLOG_TOTALS_WINDOW_KEY, SNS_HISTORY_ACCOUNT_COLUMNS, SNS_HISTORY_BLOG_DAILY_COLUMNS, SNS_HISTORY_BLOG_PAGES_COLUMNS, SNS_HISTORY_BLOG_POSTS_COLUMNS, SNS_HISTORY_BLOG_POSTS_DAILY_COLUMNS, SNS_HISTORY_BLOG_SCROLL_COLUMNS, SNS_HISTORY_BLOG_SOURCES_COLUMNS, SNS_HISTORY_BLOG_SPEED_COLUMNS, SNS_HISTORY_BLOG_SPEED_CUMULATIVE_COLUMNS, SNS_HISTORY_BLOG_TOTALS_COLUMNS, SNS_HISTORY_DAILY_COLUMNS, SNS_HISTORY_DEMOGRAPHICS_COLUMNS, SNS_HISTORY_MEDIA_COLUMNS, SNS_HISTORY_SHEET_ID_PROPERTY, SNS_HISTORY_THREADS_ACCOUNT_COLUMNS, SNS_HISTORY_THREADS_MEDIA_COLUMNS, SNS_HISTORY_TIKTOK_MEDIA_COLUMNS, SNS_HISTORY_X_DAILY_COLUMNS, SNS_HISTORY_X_MEDIA_COLUMNS, SNS_HISTORY_YOUTUBE_MEDIA_COLUMNS, appendSnsHistory_, buildSnsHistoryAccountRow_, buildSnsHistoryDailyRows_, buildSnsHistoryDemographicsRows_, buildSnsHistoryMediaRows_, buildSnsHistoryThreadsAccountRows_, buildSnsHistoryThreadsMediaRows_, buildSnsHistoryTikTokMediaRows_, buildSnsHistoryXDailyRows_, buildSnsHistoryXMediaRows_, buildSnsHistoryYouTubeMediaRows_, ensureSnsHistorySheet_, mergeSnsHistoryRows_, readSnsHistoryRows_, snsHistoryKeyCell_, snsHistoryNumCell_, snsHistoryTextCell_, summarizeSnsHistoryError_, upsertSnsHistorySheet_ };

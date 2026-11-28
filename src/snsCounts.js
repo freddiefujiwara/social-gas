@@ -128,12 +128,14 @@ function buildSnsCountsResponse_() {
       },
       threads: { followers: null },
       x: { followers: null },
+      tiktok: { followers: null },
     };
   }
   const youtube = snapshot.youtube || {};
   const instagram = snapshot.instagram || {};
   const threads = snapshot.threads || {};
   const x = snapshot.x || {};
+  const tiktok = snapshot.tiktok || {};
   return {
     ok: true,
     action: 'sns_counts',
@@ -155,6 +157,7 @@ function buildSnsCountsResponse_() {
     },
     threads: { followers: snsNumberOrNull_(threads.followers) },
     x: { followers: snsNumberOrNull_(x.followers) },
+    tiktok: { followers: snsNumberOrNull_(tiktok.followers) },
   };
 }
 
@@ -209,6 +212,14 @@ function buildEmptySnsDetail_() {
       video_count: null,
       recent_videos: null,
       youtube_error: null,
+    },
+    tiktok: {
+      followers: null,
+      following: null,
+      total_likes: null,
+      video_count: null,
+      recent_videos: null,
+      tiktok_error: null,
     },
     instagram: {
       freddiefujiwara: null,
@@ -286,7 +297,7 @@ function buildEmptySnsDetail_() {
 //                list keeps only its top posts, trimmed (see
 //                SNS_DETAIL_OVERVIEW_TOP_POSTS below), and
 //                the X reaction collections empty.
-//   instagram / threads / youtube / x
+//   instagram / threads / youtube / x / tiktok
 //                only that platform's section, complete.
 // An unknown scope reads as no scope. Every variant carries
 // detail_scope at the top level (the full payload does not),
@@ -302,6 +313,7 @@ const SNS_DETAIL_VARIANT_SCOPES = [
   'threads',
   'youtube',
   'x',
+  'tiktok',
 ];
 
 // The per-post collections the overview scope empties, per
@@ -342,6 +354,10 @@ const SNS_DETAIL_OVERVIEW_TOP_POSTS = {
   x: {
     field: 'recent_posts',
     itemFields: ['text', 'url', 'views'],
+  },
+  tiktok: {
+    field: 'recent_videos',
+    itemFields: ['title', 'url', 'views'],
   },
 };
 
@@ -463,6 +479,7 @@ function shapeSnsDetail_(detail, scope) {
       ),
       threads: shapeSnsDetailOverviewSection_('threads', detail.threads),
       x: shapeSnsDetailOverviewSection_('x', detail.x),
+      tiktok: shapeSnsDetailOverviewSection_('tiktok', detail.tiktok),
     };
   }
   const shaped = { collected_at: detail.collected_at, detail_scope: scope };
