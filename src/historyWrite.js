@@ -67,8 +67,8 @@ const SNS_HISTORY_ACCOUNT_COLUMNS = [
   // appended after x_followers under the same rule.
   'x_api_balance_usd',
   // The TikTok account totals, appended after x_api_balance_usd
-  // under the same rule. TikTok followers deliberately stay out
-  // of total_followers (see buildSnsHistoryAccountRow_).
+  // under the same rule. TikTok followers are summed into
+  // total_followers (see buildSnsHistoryAccountRow_).
   'tiktok_followers',
   'tiktok_total_likes',
   'tiktok_video_count',
@@ -321,9 +321,9 @@ function snsHistoryTextCell_(value) {
 
 // One "account" row from a snapshot. total_followers is the
 // combined follower total the screens chart — main Instagram +
-// Threads + YouTube + X — summing only the values that are
-// numbers, and stays empty when all four are null. Null values
-// become empty cells throughout.
+// Threads + YouTube + X + TikTok — summing only the values that
+// are numbers, and stays empty when all five are null. Null
+// values become empty cells throughout.
 function buildSnsHistoryAccountRow_(snapshot) {
   const snap = snapshot || {};
   const youtube = snap.youtube || {};
@@ -337,6 +337,7 @@ function buildSnsHistoryAccountRow_(snapshot) {
     snsNumberOrNull_(threads.followers),
     snsNumberOrNull_(youtube.subscribers),
     snsNumberOrNull_(x.followers),
+    snsNumberOrNull_(tiktok.followers),
   ].filter((value) => value !== null);
   return [
     snsHistoryTextCell_(snap.collected_at),

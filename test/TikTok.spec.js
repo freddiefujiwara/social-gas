@@ -594,13 +594,13 @@ describe('TikTok via the Display API', () => {
       },
     });
 
-    it('appends the TikTok totals at the end of the account row, outside total_followers', () => {
+    it('appends the TikTok totals at the end of the account row, inside total_followers', () => {
       const row = Code.buildSnsHistoryAccountRow_(snapshotWithTikTok());
       expect(row).toHaveLength(Code.SNS_HISTORY_ACCOUNT_COLUMNS.length);
       const totalIndex =
         Code.SNS_HISTORY_ACCOUNT_COLUMNS.indexOf('total_followers');
-      // 2000 + 252 + 10: the TikTok followers are NOT summed in.
-      expect(row[totalIndex]).toBe(2262);
+      // 2000 + 252 + 10 + 1234: the TikTok followers are summed in.
+      expect(row[totalIndex]).toBe(3496);
       const columns = Code.SNS_HISTORY_ACCOUNT_COLUMNS;
       expect(row[columns.indexOf('tiktok_followers')]).toBe(1234);
       expect(row[columns.indexOf('tiktok_total_likes')]).toBe(7890);
