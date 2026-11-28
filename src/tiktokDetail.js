@@ -707,8 +707,37 @@ function uploadTikTokDraftBytes_(bytes) {
 // reviews and posts it from the TikTok app. Logs and returns
 // the publish_id and the final status; failures throw with
 // the failed stage in the message.
+/**
+ * Downloads a Drive file's bytes through the Drive API with the script's
+ * own OAuth token. DriveApp is not used on purpose: this project's GCP
+ * project cannot auto-enable the Drive API, so DriveApp calls fail with
+ * "Permission denied while enabling APIs: drive", while a plain UrlFetch
+ * download works with the granted drive.readonly scope.
+ */
+function fetchDriveFileBytes_(fileId) {
+  const response = UrlFetchApp.fetch(
+    'https://www.googleapis.com/drive/v3/files/' +
+      encodeURIComponent(fileId) +
+      '?alt=media',
+    {
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true,
+    }
+  );
+  const code = response.getResponseCode();
+  if (code !== 200) {
+    throw new Error(
+      'TikTok draft upload failed at drive download: HTTP ' +
+        code +
+        ': ' +
+        String(response.getContentText() || '').slice(0, 200)
+    );
+  }
+  return response.getContent();
+}
+
 function uploadTikTokDraftFromDrive(fileId) {
-  const bytes = DriveApp.getFileById(fileId).getBlob().getBytes();
+  const bytes = fetchDriveFileBytes_(fileId);
   const result = uploadTikTokDraftBytes_(bytes);
   console.log(
     'TikTok draft sent to inbox: publish_id=' +
@@ -720,4 +749,4 @@ function uploadTikTokDraftFromDrive(fileId) {
 }
 
 
-export { SNS_TIKTOK_RECENT_VIDEOS_LIMIT, TIKTOK_OAUTH_STATE, TIKTOK_REDIRECT_URI, bootstrapTikTokToken, fetchTikTokAccountDetail_, fetchTikTokRecentVideos_, handleTikTokOAuthCallback_, logTikTokAuthorizeUrl, summarizeTikTokError_, tikTokAuthorizeUrl_, tikTokPublishedAt_, tikTokStoredUsername_, tikTokVideoUrl_, uploadTikTokDraftBytes_, uploadTikTokDraftFromDrive };
+export { SNS_TIKTOK_RECENT_VIDEOS_LIMIT, TIKTOK_OAUTH_STATE, TIKTOK_REDIRECT_URI, bootstrapTikTokToken, fetchDriveFileBytes_, fetchTikTokAccountDetail_, fetchTikTokRecentVideos_, handleTikTokOAuthCallback_, logTikTokAuthorizeUrl, summarizeTikTokError_, tikTokAuthorizeUrl_, tikTokPublishedAt_, tikTokStoredUsername_, tikTokVideoUrl_, uploadTikTokDraftBytes_, uploadTikTokDraftFromDrive };

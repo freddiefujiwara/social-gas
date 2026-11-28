@@ -1099,27 +1099,42 @@ describe('TikTok via the Display API', () => {
       expect(sleepSpy).toHaveBeenCalledTimes(11);
     });
 
-    it('reads the video bytes from Drive in uploadTikTokDraftFromDrive', () => {
+    it('downloads the video bytes from Drive in uploadTikTokDraftFromDrive', () => {
       configureValidToken();
       routeUploadApi();
       const bytes = dummyBytes(512);
-      global.DriveApp = {
-        getFileById: vi.fn(() => ({
-          getBlob: () => ({ getBytes: () => bytes }),
-        })),
+      global.ScriptApp = { getOAuthToken: vi.fn(() => 'oauth-token') };
+      const route = fetchHandler;
+      fetchHandler = (url, options) => {
+        if (
+          url.startsWith('https://www.googleapis.com/drive/v3/files/')
+        ) {
+          return {
+            getResponseCode: () => 200,
+            getContent: () => bytes,
+            getContentText: () => '',
+          };
+        }
+        return route(url, options);
       };
 
       const result = Code.uploadTikTokDraftFromDrive('dummy-file-id');
 
-      expect(global.DriveApp.getFileById).toHaveBeenCalledWith(
-        'dummy-file-id'
-      );
       expect(result).toEqual({
         publish_id: 'publish-1',
         status: 'SEND_TO_USER_INBOX',
       });
-      const [, putOptions] = global.UrlFetchApp.fetch.mock.calls[1];
-      expect(putOptions.payload).toEqual(bytes);
+      const [driveUrl, driveOptions] =
+        global.UrlFetchApp.fetch.mock.calls[0];
+      expect(driveUrl).toBe(
+        'https://www.googleapis.com/drive/v3/files/dummy-file-id?alt=media'
+      );
+      expect(driveOptions.headers.Authorization).toBe('Bearer oauth-token');
+      const putCall = global.UrlFetchApp.fetch.mock.calls.find(([url]) =>
+        url.startsWith('https://example.com/upload/')
+      );
+      expect(putCall[1].payload).toEqual(bytes);
+      delete global.ScriptApp;
     });
   });
 });
