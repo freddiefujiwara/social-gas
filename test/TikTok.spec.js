@@ -444,6 +444,34 @@ describe('TikTok via the Display API', () => {
     });
   });
 
+  describe('handleTikTokOAuthCallback_', () => {
+    it('stores the code as TIKTOK_AUTH_CODE', () => {
+      expect(Code.handleTikTokOAuthCallback_('dummy-code')).toBe(true);
+      expect(store.TIKTOK_AUTH_CODE).toBe('dummy-code');
+    });
+
+    it('stores nothing and returns false without a code', () => {
+      expect(Code.handleTikTokOAuthCallback_('')).toBe(false);
+      expect(Code.handleTikTokOAuthCallback_(null)).toBe(false);
+      expect(Code.handleTikTokOAuthCallback_(undefined)).toBe(false);
+      expect(store.TIKTOK_AUTH_CODE).toBeUndefined();
+    });
+
+    it('feeds bootstrapTikTokToken: a stored callback code exchanges normally', () => {
+      configureCredentials();
+      delete store.TIKTOK_REFRESH_TOKEN;
+      expect(Code.handleTikTokOAuthCallback_('dummy-code')).toBe(true);
+      routeTikTokApi();
+
+      expect(Code.bootstrapTikTokToken()).toBe(true);
+
+      const [, tokenOptions] = global.UrlFetchApp.fetch.mock.calls[0];
+      expect(tokenOptions.payload.code).toBe('dummy-code');
+      expect(store.TIKTOK_AUTH_CODE).toBeUndefined();
+      expect(store.TIKTOK_REFRESH_TOKEN).toBe('new-refresh-token');
+    });
+  });
+
   describe('collection and the public projection', () => {
     it('lands in the snapshot via collectSnsCounts', () => {
       configureValidToken();

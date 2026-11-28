@@ -195,6 +195,42 @@ describe('Threads OAuth completed inside GAS', () => {
     });
   });
 
+  describe('doGet TikTok OAuth callback', () => {
+    it('stores the code as TIKTOK_AUTH_CODE and confirms receipt, without any token call', () => {
+      Code.doGet({
+        parameter: { code: 'dummy-tiktok-code', state: Code.TIKTOK_OAUTH_STATE },
+      });
+      expect(store.TIKTOK_AUTH_CODE).toBe('dummy-tiktok-code');
+      expect(fetchCalls).toHaveLength(0);
+      expect(lastOutput().mimeType).toBe('text/html');
+      expect(lastOutput().text).toContain(
+        'TikTok の認可コードを受け取りました'
+      );
+    });
+
+    it('wins over the Threads branch even while a Threads state is saved', () => {
+      setupApp();
+      store.THREADS_OAUTH_STATE = 'expected-state';
+      Code.doGet({
+        parameter: { code: 'dummy-tiktok-code', state: Code.TIKTOK_OAUTH_STATE },
+      });
+      expect(store.TIKTOK_AUTH_CODE).toBe('dummy-tiktok-code');
+      expect(store.META_THREADS_ACCESS_TOKEN).toBeUndefined();
+      expect(store.THREADS_OAUTH_STATE).toBe('expected-state');
+      expect(fetchCalls).toHaveLength(0);
+      expect(lastOutput().text).toContain(
+        'TikTok の認可コードを受け取りました'
+      );
+    });
+
+    it('does not store a TikTok code for any other state', () => {
+      Code.doGet({ parameter: { code: 'dummy-code', state: 'someone-else' } });
+      expect(store.TIKTOK_AUTH_CODE).toBeUndefined();
+      expect(lastOutput().mimeType).toBe('text/html');
+      expect(lastOutput().text).toContain('確認できませんでした');
+    });
+  });
+
   describe('refreshThreadsTokenIfNeeded (age based)', () => {
     it('does nothing without a token or without THREADS_TOKEN_AT', () => {
       expect(Code.refreshThreadsTokenIfNeeded()).toBeNull();

@@ -5,6 +5,7 @@ import { fetchMusicCount_, fetchTopArticles_ } from './publicActions.js';
 import { extractIdToken_, getScriptProperty_, issueOwnerSession_, issueShareSession_, requireOwnerAuth_, revokeOwnerSession_, revokeShareSession_, validateOwnerToken_, validateShareToken_, verifyGoogleIdTokenOrThrow_ } from './auth.js';
 import { buildSnsCountsResponse_, buildSnsDetailResponse_ } from './snsCounts.js';
 import { THREADS_OAUTH_STATE_PROPERTY, handleThreadsOAuthCallback_, threadsAuthorizeUrl } from './threadsAuth.js';
+import { TIKTOK_OAUTH_STATE, handleTikTokOAuthCallback_ } from './tiktokDetail.js';
 import { SNS_HISTORY_SHEET_ID_PROPERTY, summarizeSnsHistoryError_ } from './historyWrite.js';
 import { buildSnsHistoryResponse_ } from './snsHistoryRead.js';
 import { buildBlogReportResponse_ } from './sheetRead.js';
@@ -190,6 +191,23 @@ function doGet(e) {
     // other route. A code whose state does not match the saved one is
     // never treated as an API action; it just gets a plain page.
     if (parameter.code) {
+      // TikTok OAuth callback: TikTok redirects the owner's
+      // browser here with a code after logTikTokAuthorizeUrl().
+      // Its state is the fixed TIKTOK_OAUTH_STATE, told apart
+      // from the Threads callback below (whose state is a saved
+      // random value) and checked first, so a TikTok code is
+      // never mistaken for a Threads one. The handler only
+      // stores the code — bootstrapTikTokToken() exchanges it
+      // later — so the page just confirms receipt.
+      if (parameter.state === TIKTOK_OAUTH_STATE) {
+        if (handleTikTokOAuthCallback_(parameter.code)) {
+          return htmlOut_(
+            '<!DOCTYPE html><html><body>' +
+              '<p>TikTok の認可コードを受け取りました。このタブは閉じて構いません。</p>' +
+              '</body></html>'
+          );
+        }
+      }
       const expectedState = getScriptProperty_(THREADS_OAUTH_STATE_PROPERTY);
       if (expectedState && parameter.state && parameter.state === expectedState) {
         const result = handleThreadsOAuthCallback_(parameter.code);
