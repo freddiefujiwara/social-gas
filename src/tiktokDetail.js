@@ -57,8 +57,17 @@ const TIKTOK_OAUTH_SCOPES = 'user.info.basic,user.info.stats,video.list';
 // Threads callback, whose state is a saved random value, so
 // the two can never collide).
 const TIKTOK_OAUTH_STATE = 'social-gas';
+// Only the statistics fields are requested from /v2/user/info/.
+// The basic fields (open_id, display_name, username) stay out
+// on purpose: measured on 2026-11-28 in the Sandbox, a user-info
+// call that includes a basic field fails wholesale with
+// HTTP 401 scope_not_authorized — even though user.info.basic
+// is granted — and takes the statistics down with it, while a
+// statistics-only call succeeds. The username therefore comes
+// from the recorded TIKTOK_USERNAME property whenever the
+// response carries none (see fetchTikTokAccountDetail_).
 const TIKTOK_USER_FIELDS =
-  'open_id,display_name,username,follower_count,following_count,likes_count,video_count';
+  'follower_count,following_count,likes_count,video_count';
 const TIKTOK_VIDEO_FIELDS =
   'id,create_time,title,duration,view_count,like_count,comment_count,share_count';
 const SNS_TIKTOK_RECENT_VIDEOS_LIMIT = 20;
@@ -281,8 +290,9 @@ function tikTokPublishedAt_(createTime) {
 
 // The newest videos (up to SNS_TIKTOK_RECENT_VIDEOS_LIMIT) with
 // their public metrics. The watch URLs are built from the
-// username the user-info call returned; without it they stay
-// null and the rest of each entry is unaffected.
+// account username (the user-info response's, or the recorded
+// one); without it they stay null and the rest of each entry
+// is unaffected.
 function fetchTikTokRecentVideos_(token, username) {
   const res = fetchTikTokJson_(
     TIKTOK_API_BASE +
@@ -369,6 +379,13 @@ function fetchTikTokAccountDetail_() {
         result.username
       );
     }
+  }
+  if (!result.username) {
+    // The statistics-only request above normally returns no
+    // username: fall back to the recorded one so the video
+    // URLs below can still be built. Stays null when none was
+    // ever recorded.
+    result.username = tikTokStoredUsername_();
   }
   const videos = fetchTikTokRecentVideos_(auth.token, result.username);
   result.recent_videos = videos.videos;
